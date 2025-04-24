@@ -1682,7 +1682,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
                     "is_gene_sample": False,
                     "cre_mask": cre_mask,
                     "cre_activity_label": np.zeros(len(cre_mask)), # Set below
-                    "oligo_ids": np.full(len(cre_mask), "", dtype="<U10"), # Set below
+                    "oligo_ids": np.full(len(cre_mask), None), # Set below
                 }
                 
                 # Add cre activity label for all CREs in the window (not only the focused CREs)
@@ -1731,7 +1731,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             
             # Add oligo IDs if available
             if 'oligo_ids' in self.cre_info[celltype]:
-                updated_info["oligo_ids"] = np.full(len(cre_mask), "", dtype="<U10")
+                updated_info["oligo_ids"] = np.full(len(cre_mask), None)
                 if len(cre_indices) > 0:
                     updated_info["oligo_ids"][cre_mask == 1] = self.cre_info[celltype]['oligo_ids'][cre_indices]
             
@@ -1772,10 +1772,8 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             "cre_mask": np.zeros(self.num_region_per_sample, dtype=np.int8),
             "gene_name": "",
             "strand": -1,
-            "tss_peak": np.int64(100),
-            "all_tss_peak": np.full(self.num_region_per_sample, -1, dtype=np.int64),
             "cre_peak_idx": -1,
-            "oligo_ids": np.full(self.num_region_per_sample, "").tolist(),
+            "oligo_ids": np.full(self.num_region_per_sample, None),
             "cre_activity_label": np.zeros(self.num_region_per_sample, dtype=np.float32).reshape(-1, 1),
             "mask": np.zeros(self.num_region_per_sample, dtype=np.int8),
         }
@@ -1819,33 +1817,33 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
                 if "gene_name" in sample_info:
                     result["gene_name"] = sample_info["gene_name"]
                 
-                if "tss_idx" in sample_info:
-                    tss_relative_idx = sample_info["tss_idx"] - start_idx
-                    result["tss_peak"] = tss_relative_idx
+                # if "tss_idx" in sample_info:
+                #     tss_relative_idx = sample_info["tss_idx"] - start_idx
+                #     result["tss_peak"] = tss_relative_idx
                 
                 if "strand" in sample_info:
                     result["strand"] = sample_info["strand"]
                 
-                if "tss_peaks" in sample_info:
-                    # Filter and pad TSS peaks
-                    valid_tss_peaks = sample_info["tss_peaks"]
-                    valid_tss_peaks = valid_tss_peaks[
-                        (valid_tss_peaks >= 0) & (valid_tss_peaks < self.num_region_per_sample)
-                    ]
+                # if "tss_peaks" in sample_info:
+                #     # Filter and pad TSS peaks
+                #     valid_tss_peaks = sample_info["tss_peaks"]
+                #     valid_tss_peaks = valid_tss_peaks[
+                #         (valid_tss_peaks >= 0) & (valid_tss_peaks < self.num_region_per_sample)
+                #     ]
                     
-                    padded_tss_peaks = np.pad(
-                        valid_tss_peaks,
-                        (0, self.num_region_per_sample - len(valid_tss_peaks)),
-                        mode="constant",
-                        constant_values=-1,
-                    )
-                    result["all_tss_peak"] = padded_tss_peaks.astype(np.int64)
+                #     padded_tss_peaks = np.pad(
+                #         valid_tss_peaks,
+                #         (0, self.num_region_per_sample - len(valid_tss_peaks)),
+                #         mode="constant",
+                #         constant_values=-1,
+                #     )
+                #     result["all_tss_peak"] = padded_tss_peaks
             
             if "cre_activity" in self.label_types:
                 # For gene samples, also check if there are CREs in this region and add the cre activity label
                 result['cre_mask'] = sample_info['cre_mask']
                 result['cre_activity_label'] = sample_info['cre_activity_label'].reshape(-1, 1).astype(np.float32)
-                result['oligo_ids'] = sample_info['oligo_ids'].tolist()
+                result['oligo_ids'] = sample_info['oligo_ids']
         else:
             # For CRE samples: populate the CRE mask
             cre_peak_idx = sample_info["cre_peak_idx"]
@@ -1854,7 +1852,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             
             # Add oligo information if available
             if "oligo_ids" in sample_info:
-                result["oligo_ids"] = sample_info["oligo_ids"].tolist()
+                result["oligo_ids"] = sample_info["oligo_ids"]
             
             # For CRE samples, also check if there are TSS positions in this region
             tss_mask = np.zeros(region_length)
@@ -1889,5 +1887,5 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
         
         # Set the final region_motif data
         result["region_motif"] = region_motif_i.astype(np.float32)
-
+        
         return result

@@ -42,7 +42,8 @@ def setup_trainer(cfg):
     if cfg.machine.num_devices > 0:
         strategy = "auto"
         accelerator = "gpu" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-        device = cfg.machine.num_devices
+        # device = cfg.machine.num_devices
+        device = cfg.machine.device_ids
         if cfg.machine.num_devices > 1:
             strategy = "ddp_find_unused_parameters_true"
     else:
@@ -102,7 +103,7 @@ def setup_trainer(cfg):
         accelerator=accelerator,
         num_sanity_val_steps=10,
         strategy=strategy,
-        devices=device,
+        devices=device, # Will use the device_ids list
         logger=logger,
         callbacks=callbacks,
         plugins=plugins,
@@ -147,7 +148,7 @@ def load_checkpoint(checkpoint_path, model_key=None):
             checkpoint_path, map_location="cpu", check_hash=True
         )
     else:
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, weights_only = False, map_location="cpu")
     print("Load ckpt from %s" % checkpoint_path)
 
     if model_key is not None:
@@ -221,8 +222,17 @@ def load_state_dict(model, state_dict, strict=True, patterns_to_drop=[]):
     # Remove keys matching the patterns_to_drop
     for pattern in patterns_to_drop:
         state_dict = {k: v for k, v in state_dict.items() if pattern not in k}
-    model.load_state_dict(state_dict, strict=strict)
+    
+    model_dict = model.state_dict()
 
+    # Filter out weights that exist in both the pretrained checkpoint and model
+    matched_dict = {k: v for k, v in state_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
+
+    # Update model's state_dict with the matched pretrained weights
+    model_dict.update(matched_dict)
+
+    # Now load the updated dict with strict=True: no unexpected keys, no missing ones
+    model.load_state_dict(model_dict)
 
 def recursive_detach(tensors):
     if isinstance(tensors, dict):

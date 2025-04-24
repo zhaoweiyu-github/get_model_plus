@@ -1042,3 +1042,141 @@ class ConvBlock(nn.Module):
         out = self.batch_norm2(out)
         out = F.relu(out+x)
         return out
+
+# --------------------
+#  for get_model_plus
+# --------------------
+
+@dataclass
+class MultitaskATACHeadConfig(BaseConfig):
+    """Configuration class for the quantitative ATAC head paired with expression head.
+
+    Args:
+        embed_dim (int): Dimension of the embedding.
+        output_dim (int): Dimension of the output."""
+    _target_: str = "get_model.model.modules.MultitaskATACHeadConfig"
+    embed_dim: int = 768
+    output_dim: int = 1
+    use_atac: bool = False
+
+
+class MultitaskATACHead(BaseModule):
+    """MultitaskATAC head"""
+
+    def __init__(self, cfg: MultitaskATACHeadConfig):
+        super().__init__(cfg)
+        self.use_atac = cfg.use_atac
+        if self.use_atac:
+            self.head = nn.Linear(cfg.embed_dim + 1, cfg.output_dim)
+        else:
+            self.head = nn.Linear(cfg.embed_dim, cfg.output_dim)
+
+        trunc_normal_(self.head.weight, std=.02)
+
+        self.head.weight.data.mul_(0.001)
+        self.head.bias.data.mul_(0.001)
+
+    def forward(self, x, atac=None):
+        if self.use_atac:
+            x = torch.cat([x, atac], dim=-1)
+        return self.head(x)
+
+@dataclass
+class CREActivityHeadConfig(BaseConfig):
+    """Configuration class for the CRE activity prediction head.
+
+    Args:
+        embed_dim (int): Dimension of the embedding.
+        output_dim (int): Dimension of the output.
+        use_atac (bool): Whether to use ATAC data as additional input feature.
+    """
+    _target_: str = "get_model.model.modules.CREActivityHeadConfig"
+    embed_dim: int = 768
+    output_dim: int = 1
+    use_atac: bool = False
+
+
+class CREActivityHead(BaseModule):
+    """CRE activity prediction head"""
+
+    def __init__(self, cfg: CREActivityHeadConfig):
+        super().__init__(cfg)
+        self.use_atac = cfg.use_atac
+        if self.use_atac:
+            self.head = nn.Linear(cfg.embed_dim + 1, cfg.output_dim)
+        else:
+            self.head = nn.Linear(cfg.embed_dim, cfg.output_dim)
+
+        trunc_normal_(self.head.weight, std=.02)
+
+        # Initialize with small weights
+        self.head.weight.data.mul_(0.001)
+        self.head.bias.data.mul_(0.001)
+
+    def forward(self, x, atac=None):
+        """Forward pass for CRE activity prediction.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, seq_length, embed_dim]
+            atac (torch.Tensor, optional): ATAC accessibility tensor of shape [batch_size, seq_length, 1]
+                
+        Returns:
+            torch.Tensor: CRE activity predictions of shape [batch_size, seq_length, output_dim]
+        """
+        if self.use_atac and atac is not None:
+            x = torch.cat([x, atac], dim=-1)
+        return self.head(x)
+    
+@dataclass
+class GatedHeadConfig(BaseConfig):
+    """Configuration class for a gated combination of expression and ATAC heads.
+
+    Args:
+        embed_dim (int): Dimension of the embedding.
+        gate_hidden_dim (int): Dimension of the hidden layer for the gate.
+    """
+    _target_: str = "get_model.model.modules.GatedHeadConfig"
+    embed_dim: int = 768
+    gate_hidden_dim: int = 256
+
+class GatedHead(BaseModule):
+    """Combines expression and ATAC heads using a learned gate"""
+
+    def __init__(self, cfg: GatedHeadConfig, head_exp, head_atac):
+        super().__init__(cfg)
+        self.head_exp = head_exp
+        self.head_atac = head_atac
+        
+        # Gate network to determine how to combine the heads
+        self.gate_fc1 = nn.Linear(cfg.embed_dim, cfg.gate_hidden_dim)
+        self.gate_fc2 = nn.Linear(cfg.gate_hidden_dim, 1)
+        self.gate_act = nn.GELU()
+    
+    def forward(self, x):
+        # Get outputs from both heads
+        exp_output = F.softplus(self.head_exp(x))
+        atac_output = F.GELU(self.head_atac(x))
+        
+        # Calculate gate value (sigmoid to get value between 0 and 1)
+        gate = self.gate_fc1(x)
+        gate = self.gate_act(gate)
+        gate = torch.sigmoid(self.gate_fc2(gate))
+        
+        # Combine outputs using gate
+        combined_output = gate * exp_output + (1 - gate) * atac_output
+        
+        return combined_output, exp_output, atac_output, gate
+    
+# @dataclass
+# class MultitaskSupervisedFlagConfig(BaseConfig):
+#     """Configuration class for multitask supervised flag.
+
+#     Args:
+#         supervised_atac (bool): Whether to use quantitative ATAC data as supervised signals.
+#         supervised_cre (bool): Whether to use CRE activity as supervised signals.
+#         supervised_exp (bool): Whether to use expression as supervised signals.
+#     """
+#     _target_: str = "get_model.model.modules.MultitaskSupervisedFlagConfig"
+#     supervised_atac: bool = True
+#     supervised_cre: bool = True
+#     supervised_exp: bool = True

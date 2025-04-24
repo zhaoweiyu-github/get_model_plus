@@ -10,14 +10,16 @@ from hydra.utils import instantiate
 from omegaconf import MISSING, DictConfig
 from torch.nn.init import trunc_normal_
 
-from get_model.model.modules import (ATACHead, ATACHeadConfig, ContactMapHead, ContactMapHeadConfig, ConvBlock, DistanceContactHead, DistanceContactHeadConfig, HiCHead, HiCHeadConfig,
+from get_model.model.modules import (MultitaskATACHead, MultitaskATACHeadConfig, ATACHeadConfig, ContactMapHead, ContactMapHeadConfig, ConvBlock, DistanceContactHead, DistanceContactHeadConfig, HiCHead, HiCHeadConfig,
                                      ATACSplitPool,
                                      ATACSplitPoolConfig, ATACSplitPoolMaxNorm,
                                      ATACSplitPoolMaxNormConfig, BaseConfig,
                                      BaseModule, ConvPool, ConvPoolConfig,
                                      ExpressionHead, ExpressionHeadConfig,
                                      MotifScanner, MotifScannerConfig,
-                                     RegionEmbed, RegionEmbedConfig, SplitPool, SplitPoolConfig)
+                                     RegionEmbed, RegionEmbedConfig, SplitPool, SplitPoolConfig,
+                                     GatedHeadConfig, GatedHead,
+                                     CREActivityHead, CREActivityHeadConfig)
 from get_model.model.position_encoding import AbsolutePositionalEncoding
 from get_model.model.transformer import GETTransformer, GETTransformerWithContactMap, GETTransformerWithContactMapAxial, GETTransformerWithContactMapOE
 
@@ -1819,4 +1821,133 @@ class GETNucleotideRegionFinetuneExpHiCABC(BaseGETModel):
             'max_n_peaks': torch.tensor([R]),
             'peak_coord': torch.randn(B, R, 1).float(),
             'distance_map': torch.randn(B, R, R).float(),
+        }
+
+# --------------------
+#  for get_model_plus
+# --------------------
+
+@dataclass
+class GETRegionCREFinetuneModelConfig(BaseGETModelConfig):
+    region_embed: RegionEmbedConfig = field(default_factory=RegionEmbedConfig)
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
+    head_exp: ExpressionHeadConfig = field(default_factory=ExpressionHeadConfig)
+    head_atac: MultitaskATACHeadConfig = field(default_factory=MultitaskATACHeadConfig)
+    head_cre: CREActivityHeadConfig = field(default_factory=CREActivityHeadConfig)
+
+class GETRegionCREFinetune(BaseGETModel):
+    """
+    GET model for fine-tuning on both gene expression and CRE activity prediction.
+    This model can be configured to predict gene expression, chromatin accessibility,
+    and CRE activity in any combination.
+    """
+
+    def __init__(self, cfg: GETRegionCREFinetuneModelConfig):
+        super().__init__(cfg)
+        self.region_embed = RegionEmbed(cfg.region_embed)
+        self.encoder = GETTransformer(**cfg.encoder)
+        
+        # Configure heads based on what outputs are needed
+        self.supervised_exp = True
+        self.supervised_atac = True
+        self.supervised_cre = True
+        
+        if self.supervised_exp:
+            self.head_exp = ExpressionHead(cfg.head_exp)
+        
+        if self.supervised_atac:
+            self.head_atac = MultitaskATACHead(cfg.head_atac)
+            
+        if self.supervised_cre:
+            self.head_cre = CREActivityHead(cfg.head_cre)
+            
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, cfg.encoder.embed_dim))
+        self.apply(self._init_weights)
+
+    def get_input(self, batch, perturb=False):
+        input_dict = {
+            'region_motif': batch['region_motif'],
+        }
+            
+        return input_dict
+
+    def forward(self, region_motif, cre_mask=None):
+        """
+        Forward pass of the model.
+        
+        Args:
+            region_motif (torch.Tensor): Input region motif tensor of shape [batch_size, seq_length, motif_dim]
+            cre_mask (torch.Tensor, optional): CRE mask tensor of shape [batch_size, seq_length]
+                
+        Returns:
+            dict: Dictionary containing the model outputs, which may include:
+                - 'exp': Expression predictions
+                - 'atac': ATAC predictions
+                - 'cre': CRE activity predictions
+        """
+        # Embed the input
+        x = self.region_embed(region_motif)
+        B, N, C = x.shape
+        
+        # Add class token
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        
+        # Run through transformer
+        x, _ = self.encoder(x)
+        
+        # Remove class token
+        x = x[:, 1:]
+        
+        # Generate outputs based on configuration
+        outputs = {}
+        
+        if self.supervised_exp:
+            outputs['exp'] = nn.Softplus()(self.head_exp(x))
+            
+        if self.supervised_atac:
+            outputs['atac'] = nn.Softplus()(self.head_atac(x))
+            
+        if self.supervised_cre:
+            outputs['cre'] = self.head_cre(x)
+            
+        return outputs
+
+    def before_loss(self, output, batch):
+        """
+        Prepare the model outputs and ground truth for loss calculation.
+        
+        Args:
+            output (dict): Model outputs from the forward pass
+            batch (dict): Input batch containing ground truth labels
+                
+        Returns:
+            tuple: (pred, obs) dictionaries for loss calculation
+        """
+        pred = {}
+        obs = {}
+        
+        if self.supervised_exp and 'exp' in output and 'exp_label' in batch:
+            pred['exp'] = output['exp']
+            obs['exp'] = batch['exp_label']
+            
+        if self.supervised_atac and 'atac' in output and 'atpm_label' in batch:
+            pred['atac'] = output['atac']
+            obs['atac'] = batch['atpm_label']
+            
+        if self.supervised_cre and 'cre' in output and 'cre_activity_label' in batch:
+
+            pred['cre'] = output['cre'][batch['cre_mask'] > 0]
+            obs['cre'] = batch['cre_activity_label'][batch['cre_mask'] > 0]
+                
+        return pred, obs
+
+    def generate_dummy_data(self):
+        B, R, M = 2, 900, 283
+        return {
+            'region_motif': torch.randn(B, R, M).float().abs(),
+            'exp_label': torch.randn(B, R, 2).float().abs(),
+            'atpm_label': torch.randn(B, R, 1).float().abs(),
+            'cre_mask': torch.randint(0, 2, (B, R)).bool(),
+            'cre_activity_label': torch.randn(B, R, 1).float().abs(),
         }

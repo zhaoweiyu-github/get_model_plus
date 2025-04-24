@@ -138,7 +138,7 @@ class LitModel(L.LightningModule):
             ):
                 add_lora_by_name(model, self.cfg.finetune.layers_with_lora, lora_config)
                 load_state_dict(
-                    model, checkpoint_model, strict=self.cfg.finetune.strict
+                    model, checkpoint_model, strict = self.cfg.finetune.strict
                 )
             elif (
                 any("lora" in k for k in checkpoint_model.keys())
@@ -155,12 +155,12 @@ class LitModel(L.LightningModule):
                     "Model checkpoint does not contain LoRA parameters but use_lora is set to True, using the checkpoint as base model"
                 )
                 load_state_dict(
-                    model, checkpoint_model, strict=self.cfg.finetune.strict
+                    model, checkpoint_model, strict = self.cfg.finetune.strict
                 )
                 add_lora_by_name(model, self.cfg.finetune.layers_with_lora, lora_config)
             else:
                 load_state_dict(
-                    model, checkpoint_model, strict=self.cfg.finetune.strict
+                    model, checkpoint_model, strict = self.cfg.finetune.strict
                 )
 
         # Load additional checkpoints
@@ -731,7 +731,6 @@ class GETDataModule(L.LightningDataModule):
                 else get_perturb_collate_fn
             ),
         )
-
 
 def run_shared(cfg, model, dm):
     trainer = setup_trainer(cfg)

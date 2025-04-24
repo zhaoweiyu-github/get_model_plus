@@ -320,6 +320,7 @@ class MachineConfig:
         num_workers: Number of workers.
         batch_size: Batch size.
         fasta_path: Path to FASTA file.
+        device_ids: List of GPU device IDs to use when num_devices >= 1.
     """
 
     codebase: str = MISSING
@@ -329,6 +330,7 @@ class MachineConfig:
     num_workers: int = 32
     batch_size: int = 16
     fasta_path: str = MISSING
+    device_ids: list = field(default_factory=lambda: [0])
 
 
 @dataclass
@@ -347,6 +349,21 @@ class TaskConfig:
     gene_list: str | None = None
     layer_names: list = field(default_factory=lambda: ["atac_attention"])
     mutations: str | None = None
+
+
+@dataclass
+class SupervisedFlagConfig:
+    """
+    Configuration for supervised learning flags.
+    
+    Attributes:
+        supervised_exp: Whether to supervise expression prediction.
+        supervised_atac: Whether to supervise ATAC-seq prediction.
+        supervised_cre: Whether to supervise CRE activity prediction.
+    """
+    supervised_exp: bool = True
+    supervised_atac: bool = True
+    supervised_cre: bool = False
 
 
 @dataclass
@@ -438,6 +455,7 @@ class RegionZarrConfig:
         optimizer: Optimizer configuration.
         finetune: Fine-tuning configuration.
         task: Task configuration.
+        supervised_flag: Configuration for supervised learning flags.
     """
 
     run: RunConfig = field(default_factory=RunConfig)
@@ -453,6 +471,7 @@ class RegionZarrConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     finetune: FinetuneConfig = field(default_factory=FinetuneConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
+    supervised_flag: SupervisedFlagConfig = field(default_factory=SupervisedFlagConfig)
 
 
 cs = ConfigStore.instance()
