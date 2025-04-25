@@ -50,7 +50,7 @@ model:
           _target_: torch.nn.MSELoss
           reduction: "mean"
         cre:
-          _target_: torch.nn.MSELoss
+          _target_: torch.nn.SmoothL1Loss
           reduction: "mean"
       weights:
         exp: 1.0
@@ -61,3 +61,5 @@ model:
         exp: ["pearson", "spearman", "r2"]
         atac: ["pearson", "spearman", "r2"]
         cre: ["pearson", "spearman", "r2"]
+    
+    _copy_supervised_flag_: ${supervised_flag} # read from main config file

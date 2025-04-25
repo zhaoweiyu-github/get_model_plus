@@ -1848,9 +1848,14 @@ class GETRegionCREFinetune(BaseGETModel):
         self.encoder = GETTransformer(**cfg.encoder)
         
         # Configure heads based on what outputs are needed
-        self.supervised_exp = True
-        self.supervised_atac = True
-        self.supervised_cre = True
+        if hasattr(cfg, '_copy_supervised_flag_'):
+            self.supervised_exp = cfg._copy_supervised_flag_.supervised_exp
+            self.supervised_atac = cfg._copy_supervised_flag_.supervised_atac
+            self.supervised_cre = cfg._copy_supervised_flag_.supervised_cre
+        else:
+            self.supervised_exp = True
+            self.supervised_atac = True
+            self.supervised_cre = True
         
         if self.supervised_exp:
             self.head_exp = ExpressionHead(cfg.head_exp)
@@ -1906,7 +1911,7 @@ class GETRegionCREFinetune(BaseGETModel):
             outputs['exp'] = nn.Softplus()(self.head_exp(x))
             
         if self.supervised_atac:
-            outputs['atac'] = nn.Softplus()(self.head_atac(x))
+            outputs['atac'] = self.head_atac(x)
             
         if self.supervised_cre:
             outputs['cre'] = self.head_cre(x)

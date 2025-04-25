@@ -442,21 +442,41 @@ class RegionMMLitModel(RegionLitModel):
         # Handle different prediction types based on what's available in the model output
         # The three possible keys are 'exp' (expression), 'atac' (chromatin accessibility), and 'cre' (CRE activity)
         
-        # For expression prediction
-        if self.cfg.eval_tss and "exp" in pred:
+        # For expression prediction (for all samples, filtered by TSS mask)
+        if self.cfg.eval_tss and self.cfg.supervised_flag.supervised_exp and "exp" in pred:
             tss_idx = batch["mask"]
             pred["exp"] = pred["exp"][tss_idx > 0].flatten()
             obs["exp"] = obs["exp"][tss_idx > 0].flatten()
             
             # Error handling for gene expression predictions
             if pred["exp"].shape[0] == 0:
-                return  # No TSS regions in this batch
-            if obs["exp"].sum() == 0:
-                return  # No expressed genes in this batch
-            if torch.isnan(pred["exp"]).any() or torch.isnan(obs["exp"]).any():
-                return  # NaN values detected
+                # Skip expression metrics if no TSS regions in this batch
+                if "exp" in pred:
+                    del pred["exp"]
+                    del obs["exp"]
+            elif obs["exp"].sum() == 0 or torch.isnan(pred["exp"]).any() or torch.isnan(obs["exp"]).any():
+                # Skip expression metrics if no expressed genes or NaN values
+                if "exp" in pred:
+                    del pred["exp"]
+                    del obs["exp"]
+            
+        # For cre prediction (for all samples, filtered by cre_mask)
+        if self.cfg.supervised_flag.supervised_cre and 'cre' in pred:
+            pred["cre"] = pred["cre"].flatten() # has been filtered by cre_mask
+            obs["cre"] = obs["cre"].flatten() # has been filtered by cre_mask
+            
+            # Error handling for CRE activity predictions
+            if pred["cre"].shape[0] == 0:
+                # Skip CRE metrics if no CREs in this batch
+                if "cre" in pred:
+                    del pred["cre"]
+                    del obs["cre"]
+            elif obs["cre"].sum() == 0 or torch.isnan(pred["cre"]).any() or torch.isnan(obs["cre"]).any():
+                # Skip CRE metrics if no CRE activity or NaN values
+                if "cre" in pred:
+                    del pred["cre"]
+                    del obs["cre"]
                 
-
         metrics = self.metrics(pred, obs)
         if batch_idx == 0 and self.cfg.log_image:
             # log one example as scatter plot
@@ -487,12 +507,18 @@ class RegionMMLitModel(RegionLitModel):
     def predict_step(self, batch, batch_idx, *args, **kwargs):
         if self.cfg.task.test_mode == "inference":
             loss, preds, obs = self._shared_step(batch, batch_idx, stage="predict")
+            is_gene = batch["is_gene_sample"]
+            # Get indices where is_gene > 0
+            gene_sample_indices = torch.where(is_gene > 0)[0]
+            # Other indices are non-gene samples
+            non_gene_sample_indices = torch.where(is_gene == 0)[0]
+
+            # For expression prediction (only for gene samples and tss in the center of the window)
+            result_df = []
             
-            if batch['is_gene_sample']:
-                # For expression prediction (only for tss when the tss in the centric of window)
-                result_df = []
-                
-                for batch_element in range(len(batch["gene_name"])):
+            if self.cfg.supervised_flag.supervised_exp and "exp" in preds:
+                # Iterate over these indices
+                for batch_element in gene_sample_indices:
                     goi_idx = batch["all_tss_peak"][batch_element]
                     goi_idx = goi_idx[goi_idx > 0]  # filter out pad (tss_peak = 0)
                     strand = batch["strand"][batch_element]
@@ -516,12 +542,14 @@ class RegionMMLitModel(RegionLitModel):
                                 "atpm": atpm,
                             }
                         )
-                result_df = pd.DataFrame(result_df)
-                # mkdir if not exist
-                os.makedirs(
-                    f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}",
-                    exist_ok=True,
-                )
+                
+            result_df = pd.DataFrame(result_df)
+            # mkdir if not exist
+            os.makedirs(
+                f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}",
+                exist_ok=True,
+            )
+            if result_df.shape[0] > 0:
                 result_df.to_csv(
                     f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}.csv",
                     index=False,
@@ -529,35 +557,35 @@ class RegionMMLitModel(RegionLitModel):
                     header=False,
                 )
             
-            else:
-                # For cre activity prediction (only for CREs when the cre is in the center of the window)
-                result_df_cre = []
-                if self.cfg.supervised_cre:
-                    
-                    cre_mask = batch["cre_mask"]
-                    masked_indices = np.where(cre_mask == 1)[0]
+            # For cre activity prediction (only for CREs and the CREs in the center of the window)
+            result_df_cre = []
+            if self.cfg.supervised_flag.supervised_cre and 'cre' in preds:                    
+                for batch_element in non_gene_sample_indices:
+                    cre_mask = batch["cre_mask"][batch_element]
+                    masked_indices = torch.where(cre_mask == 1)[0]
                     original_to_masked = {original_idx: masked_idx for masked_idx, original_idx in enumerate(masked_indices)}
-
-                    cre_peak_idx = batch["cre_peak_idx"]
+                    cre_peak_idx = batch["cre_peak_idx"][batch_element]
                     cre_peak_idx_masked = original_to_masked[cre_peak_idx]
-                    preds["cre"] = preds["cre"][cre_peak_idx_masked].flatten() # note: preds and obs have been filtered by cre_mask
-                    obs["cre"] = obs["cre"][cre_peak_idx_masked].flatten()
-                    
+                    preds["cre"] = preds["cre"][batch_element][cre_peak_idx_masked].flatten() # note: preds and obs have been filtered by cre_mask
+                    obs["cre"] = obs["cre"][batch_element][cre_peak_idx_masked].flatten()
                     result_df_cre.append(
                         {
-                            "oligo_id":batch["oligo_ids"][cre_peak_idx],
+                            "oligo_id":batch["oligo_ids"][batch_element][cre_peak_idx],
                             "cre_peak_idx":cre_peak_idx,
                             "pred":preds["cre"].cpu().item(),
                             "obs":obs["cre"].cpu().item(),
                         }
                     )
-                    result_df_cre = pd.DataFrame(result_df_cre)
-                    result_df_cre.to_csv(
-                        f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}_cre.csv",
-                        index=False,
-                        mode="a",
-                        header=False,
-                    )
+                
+            result_df_cre = pd.DataFrame(result_df_cre)
+            
+            if result_df_cre.shape[0] > 0:
+                result_df_cre.to_csv(
+                    f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}_cre.csv",
+                    index=False,
+                    mode="a",
+                    header=False,
+                )
             
             return result_df, result_df_cre
         
