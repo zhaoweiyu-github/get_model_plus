@@ -231,6 +231,10 @@ class LitModel(L.LightningModule):
             batch_size=self.cfg.machine.batch_size,
             sync_dist=self.cfg.machine.num_devices > 1,
         )
+        # Add cleanup
+        if self.device.type == "cuda": torch.cuda.empty_cache()
+        gc.collect()
+        
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -264,6 +268,10 @@ class LitModel(L.LightningModule):
                             )
                         }
                     )
+                    
+        # Add cleanup
+        if self.device.type == "cuda": torch.cuda.empty_cache()
+        gc.collect()
 
     def test_step(self, batch, batch_idx):
         loss, pred, obs = self._shared_step(batch, batch_idx, stage="test")

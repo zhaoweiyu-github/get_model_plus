@@ -1582,12 +1582,12 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
                     self.cre_info[celltype]['oligo_ids'] = None
                 
                 # Load oligo sequences if available and filter
-                if 'oligo_sequences' in zarr_obj['cre_info']:
-                    all_oligo_sequences = zarr_obj['cre_info']['oligo_sequences'][:]
-                    self.cre_info[celltype]['oligo_sequences'] = all_oligo_sequences[self.cre_info[celltype]['original_indices']]
-                else:
-                    logging.warning(f"No oligo sequences found for cell type '{celltype}'")
-                    self.cre_info[celltype]['oligo_sequences'] = None
+                # if 'oligo_sequences' in zarr_obj['cre_info']:
+                #     all_oligo_sequences = zarr_obj['cre_info']['oligo_sequences'][:]
+                #     self.cre_info[celltype]['oligo_sequences'] = all_oligo_sequences[self.cre_info[celltype]['original_indices']]
+                # else:
+                #     logging.warning(f"No oligo sequences found for cell type '{celltype}'")
+                #     self.cre_info[celltype]['oligo_sequences'] = None
             
             # Load CRE activity data if available and filter
             if 'cre_activity' in zarr_obj and celltype in zarr_obj['cre_activity']:
@@ -1632,7 +1632,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             peak_indices = self.cre_info[celltype]['peak_indices']
             original_indices = self.cre_info[celltype]['original_indices']
             oligo_ids = self.cre_info[celltype]['oligo_ids']
-            oligo_sequences = self.cre_info[celltype]['oligo_sequences']
+            # oligo_sequences = self.cre_info[celltype]['oligo_sequences']
             
             # Process each CRE peak
             for i, peak_idx in enumerate(peak_indices):

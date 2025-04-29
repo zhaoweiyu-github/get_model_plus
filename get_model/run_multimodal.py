@@ -84,7 +84,7 @@ class RegionDataModule(L.LightningDataModule):
             num_workers=self.cfg.machine.num_workers,
             drop_last=True,
             shuffle=True,
-            persistent_workers=True,
+            persistent_workers=False,
         )
 
     def val_dataloader(self):
@@ -93,7 +93,7 @@ class RegionDataModule(L.LightningDataModule):
             batch_size=self.cfg.machine.batch_size,
             num_workers=self.cfg.machine.num_workers,
             drop_last=True,
-            persistent_workers=True,
+            persistent_workers=False,
         )
 
     def test_dataloader(self):
@@ -102,7 +102,7 @@ class RegionDataModule(L.LightningDataModule):
             batch_size=self.cfg.machine.batch_size,
             num_workers=self.cfg.machine.num_workers,
             drop_last=True,
-            persistent_workers=True,
+            persistent_workers=False,
         )
 
     def predict_dataloader(self):
@@ -111,7 +111,7 @@ class RegionDataModule(L.LightningDataModule):
             batch_size=self.cfg.machine.batch_size,
             num_workers=self.cfg.machine.num_workers,
             drop_last=False,
-            persistent_workers=True,
+            persistent_workers=False,
         )
 
 
@@ -180,6 +180,10 @@ class RegionLitModel(LitModel):
             batch_size=self.cfg.machine.batch_size,
             sync_dist=distributed,
         )
+        
+        # Add cleanup
+        if self.device.type == "cuda": torch.cuda.empty_cache()
+        gc.collect()
 
     def predict_step(self, batch, batch_idx, *args, **kwargs):
         if self.cfg.task.test_mode == "inference":
@@ -503,9 +507,15 @@ class RegionMMLitModel(RegionLitModel):
             batch_size=self.cfg.machine.batch_size,
             sync_dist=distributed,
         )
+        
+        # Add cleanup
+        if self.device.type == "cuda": torch.cuda.empty_cache()
+        gc.collect()
 
     def predict_step(self, batch, batch_idx, *args, **kwargs):
+        
         if self.cfg.task.test_mode == "inference":
+            
             loss, preds, obs = self._shared_step(batch, batch_idx, stage="predict")
             is_gene = batch["is_gene_sample"]
             # Get indices where is_gene > 0
@@ -516,7 +526,7 @@ class RegionMMLitModel(RegionLitModel):
             # For expression prediction (only for gene samples and tss in the center of the window)
             result_df = []
             
-            if self.cfg.supervised_flag.supervised_exp and "exp" in preds:
+            if  "exp" in preds and len(gene_sample_indices) > 0:
                 # Iterate over these indices
                 for batch_element in gene_sample_indices:
                     goi_idx = batch["all_tss_peak"][batch_element]
@@ -526,22 +536,20 @@ class RegionMMLitModel(RegionLitModel):
                         batch["region_motif"][batch_element][goi_idx, -1].max().cpu().item()
                     )
                     gene_name = batch["gene_name"][batch_element]
-                    for key in preds:
-                        result_df.append(
-                            {
-                                "gene_name": gene_name,
-                                "key": key,
-                                "pred": preds[key][batch_element][:, strand][goi_idx]
-                                .max()
-                                .cpu()
-                                .item(),
-                                "obs": obs[key][batch_element][:, strand][goi_idx]
-                                .max()
-                                .cpu()
-                                .item(),
-                                "atpm": atpm,
-                            }
-                        )
+                    result_df.append(
+                        {
+                            "gene_name": gene_name,
+                            "pred": preds['exp'][batch_element][:, strand][goi_idx]
+                            .max()
+                            .cpu()
+                            .item(),
+                            "obs": obs['exp'][batch_element][:, strand][goi_idx]
+                            .max()
+                            .cpu()
+                            .item(),
+                            "atpm": atpm,
+                        }
+                    )
                 
             result_df = pd.DataFrame(result_df)
             # mkdir if not exist
@@ -551,29 +559,61 @@ class RegionMMLitModel(RegionLitModel):
             )
             if result_df.shape[0] > 0:
                 result_df.to_csv(
-                    f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}.csv",
+                    f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}/{self.cfg.dataset.leave_out_celltypes}_exp.csv", # please specify one leave out cell type in each inference run
                     index=False,
                     mode="a",
                     header=False,
                 )
             
-            # For cre activity prediction (only for CREs and the CREs in the center of the window)
+            # For CRE activity prediction
+            # Only process samples that are CREs (non-gene samples) and have CRE predictions
             result_df_cre = []
-            if self.cfg.supervised_flag.supervised_cre and 'cre' in preds:                    
-                for batch_element in non_gene_sample_indices:
-                    cre_mask = batch["cre_mask"][batch_element]
-                    masked_indices = torch.where(cre_mask == 1)[0]
-                    original_to_masked = {original_idx: masked_idx for masked_idx, original_idx in enumerate(masked_indices)}
-                    cre_peak_idx = batch["cre_peak_idx"][batch_element]
-                    cre_peak_idx_masked = original_to_masked[cre_peak_idx]
-                    preds["cre"] = preds["cre"][batch_element][cre_peak_idx_masked].flatten() # note: preds and obs have been filtered by cre_mask
-                    obs["cre"] = obs["cre"][batch_element][cre_peak_idx_masked].flatten()
+            if 'cre' in preds and len(non_gene_sample_indices) > 0:
+                valid_oligo_ids_list = []  # Store oligo IDs for each CRE
+                valid_cre_masks = []  # Store masks for valid CRE positions
+                oligo_ids = np.array(batch["oligo_ids"]).T # This is because that the original type of oligo_ids is a list of lists
+                
+                # Process each CRE sample in the batch
+                for batch_element in range(len(gene_sample_indices) + len(non_gene_sample_indices)):
+                    if batch_element in non_gene_sample_indices:
+                        # Get the index and ID of the central CRE we want to predict
+                        central_cre_idx = batch["cre_peak_idx"][batch_element]
+                    
+                        oligo_id = oligo_ids[batch_element][central_cre_idx]
+                        valid_oligo_ids_list.append(oligo_id)
+                    
+                        # Find all valid CRE positions (where mask == 1)
+                        cre_mask = batch["cre_mask"][batch_element]
+                        valid_positions = torch.where(cre_mask == 1)[0]
+                    
+                        # Create mask identifying the central CRE position
+                        central_cre_mask = (valid_positions == central_cre_idx)
+                        valid_cre_masks.append(central_cre_mask)
+                    else:
+                        # Add a zero mask for gene samples as some gene samples have CREs but not central CREs
+                        device = batch["cre_mask"].device
+                        cre_mask = batch["cre_mask"][batch_element]
+                        valid_positions = torch.where(cre_mask == 1)[0]
+                        valid_cre_masks.append(torch.zeros(len(valid_positions), device=device))
+                
+                # Move all tensors to the same device (CPU)
+                valid_cre_masks = [mask.cpu() for mask in valid_cre_masks]
+                valid_cre_masks = torch.cat(valid_cre_masks)
+
+                # Move predictions and observations to CPU as well
+                preds_cre_cpu = preds["cre"].cpu()
+                obs_cre_cpu = obs["cre"].cpu()
+
+                # Now extract the values using the CPU tensors
+                pred_cre = preds_cre_cpu[valid_cre_masks > 0].flatten()
+                obs_cre = obs_cre_cpu[valid_cre_masks > 0].flatten()
+                
+                for i in range(len(valid_oligo_ids_list)):
                     result_df_cre.append(
                         {
-                            "oligo_id":batch["oligo_ids"][batch_element][cre_peak_idx],
-                            "cre_peak_idx":cre_peak_idx,
-                            "pred":preds["cre"].cpu().item(),
-                            "obs":obs["cre"].cpu().item(),
+                            "oligo_id": valid_oligo_ids_list[i],
+                            "pred": pred_cre.numpy()[i],
+                            "obs": obs_cre.numpy()[i],
                         }
                     )
                 
@@ -581,7 +621,7 @@ class RegionMMLitModel(RegionLitModel):
             
             if result_df_cre.shape[0] > 0:
                 result_df_cre.to_csv(
-                    f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}_cre.csv",
+                    f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}/{self.cfg.dataset.leave_out_celltypes}_cre.csv", # please specify one leave out cell type in each inference run
                     index=False,
                     mode="a",
                     header=False,
