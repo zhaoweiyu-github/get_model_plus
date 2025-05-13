@@ -1439,11 +1439,11 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
                 mask_ratio=mask_ratio,
                 drop_zero_atpm=drop_zero_atpm,
             )
-            self.sample_indices_gene_focus = self.sample_indices.copy()
+            self.sample_indices_gene_focus = self.sample_indices.copy() # filter cell types according to is_train, if train, all cell types except leave_out_celltypes, if not train, only the leave_out_celltypes
             logging.info(f"Number of gene-focused samples: {len(self.sample_indices_gene_focus)}")
             
         else:
-            # If gene_focus is False, we still need to initialize some attributes
+            # If gene_focus is False, we still need to initialize some attributes and filter cell types according to is_train
             self.sample_indices_gene_focus = []
             
             # Initialize minimal base class attributes without calling full parent __init__
@@ -1460,7 +1460,12 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             self.drop_zero_atpm = drop_zero_atpm
             
             # Use the parent class's method directly
-            self.region_motifs = RegionMotifDataset._load_region_motifs(self)
+            self.region_motifs = RegionMotifDataset._load_region_motifs(self) # # filter cell types according to is_train, if train, all cell types except leave_out_celltypes, if not train, only the leave_out_celltypes
+        
+        # Pre‐open all zarr groups once so we don't reopen on every method call
+        # (self.zarr_path is either a string or list of strings)
+        zp_list = self.zarr_path if isinstance(self.zarr_path, list) else [self.zarr_path]
+        self._zarr_objs = [zarr.open(zp, mode='r') for zp in zp_list]
         
         # Initialize CRE data if cre_focus is True
         if cre_focus:
@@ -1472,14 +1477,21 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             else:
                 # Load CRE data from zarr file
                 self._load_cre_data()
+                # Build the map of peaks indices to cre indices once
+                self._cre_local_map = {}
+                for celltype, info in self.cre_info.items():
+                    n = len(self.cres_mask[celltype])
+                    lm = np.full(n, -1, dtype=np.int32)
+                    lm[info['peak_indices']] = np.arange(len(info['peak_indices']), dtype=np.int32)
+                    self._cre_local_map[celltype] = lm
                 # Set up CRE samples
-                self.sample_indices_cre_focus = self._setup_cre_samples()
+                self.sample_indices_cre_focus = self._setup_cre_samples() 
                 logging.info(f"Number of CRE-focused samples: {len(self.sample_indices_cre_focus)}")
         else:
             self.sample_indices_cre_focus = []
             
         # Add cre information to sample indices focused on genes if cre_activity is in the label_types
-        if 'cre_activity' in self.label_types and self.cre_focus:
+        if 'cre_activity' in self.label_types and self.cre_focus and self.gene_focus:
             self.sample_indices_gene_focus = self._add_cre_info_to_gene_samples(self.sample_indices_gene_focus)
         
         # Merge sample indices from both focus types
@@ -1489,10 +1501,15 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
         # Flag to track sample type (gene or CRE)
         self.is_gene_sample = [True] * len(self.sample_indices_gene_focus) + [False] * len(self.sample_indices_cre_focus)
     
+        # Pre-cache all samples
+        self._cache = [None] * len(self.sample_indices_merged)
+        for i in tqdm(range(len(self._cache)), desc="Caching samples"):
+            self._cache[i] = self._makeitem(i)
+    
     def _check_cre_data(self):
         """Check if CRE data exists in the zarr files"""
-        for zp in (self.zarr_path if isinstance(self.zarr_path, list) else [self.zarr_path]):
-            z = zarr.open(zp, mode='r')
+        # iterate over the pre‐opened zarr groups
+        for z in self._zarr_objs:
             if 'cre_info' in z and 'cres_mask' in z:
                 return True
         return False
@@ -1506,103 +1523,63 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
         
         # Process each cell type and its zarr file
         for celltype in self.celltypes:
-            zarr_path = None
-            zarr_obj = None
-            
-            # Find zarr file containing this cell type
-            for zp in (self.zarr_path if isinstance(self.zarr_path, list) else [self.zarr_path]):
-                z = zarr.open(zp, mode='r')
-                if 'atpm' in z and celltype in z['atpm']:
-                    zarr_path = zp
-                    zarr_obj = z
-                    break
-            
-            if zarr_path is None or zarr_obj is None:
+            # pick the already‐opened group
+            zarr_obj = next((z for z in self._zarr_objs
+                             if 'cre_activity' in z and celltype in z['cre_activity']), None)
+            if zarr_obj is None or 'cre_activity' not in zarr_obj:
                 continue
-            
-            # Load original CRE mask and atpm data
-            if 'cres_mask' in zarr_obj:
-                original_cres_mask = zarr_obj['cres_mask'][:]
-            else:
-                logging.warning(f"No CRE mask found for cell type '{celltype}'")
+            # Load cre masks and atpm data
+            original_cres_mask = zarr_obj['cres_mask'][:]
+            atpm_all          = zarr_obj['atpm'][celltype][:]
+
+            # 1) build active_mask
+            active_mask         = (atpm_all != 0)
+
+            # 2) build cumulative map for indexing
+            cumsum = np.cumsum(active_mask, dtype=int) - 1
+
+            # 3) load and filter peak_indices
+            info_grp = zarr_obj.get('cre_info', None)
+            if info_grp is None or 'peak_indices' not in info_grp:
                 continue
-                
-            atpm_all = zarr_obj['atpm'][celltype][:]
-            
-            # Create mapping from original peak indices to indices after dropping zero-atpm peaks
+
+            orig_peak_idx = info_grp['peak_indices'][:] # the peak indices of cres
             if self.drop_zero_atpm:
-                # Get indices of non-zero atpm values
-                atpm_nonzero_idx = np.nonzero(atpm_all)[0]
-                
-                # Create mapping from original indices to new indices
-                self.peak_indices_map[celltype] = {orig_idx: new_idx 
-                                                 for new_idx, orig_idx in enumerate(atpm_nonzero_idx)}
-                
-                # Filter the CRE mask to include only non-zero atpm peaks
-                # The filtered mask should have the same length as atpm_nonzero_idx
-                self.cres_mask[celltype] = original_cres_mask[atpm_nonzero_idx]
-                
-                logging.info(f"Filtered CRE mask from {len(original_cres_mask)} to {len(self.cres_mask[celltype])} " +
-                            f"peaks for {celltype} (active CREs: {np.sum(original_cres_mask)} -> {np.sum(self.cres_mask[celltype])})")
+                # filter the cre mask by the active mask
+                self.cres_mask[celltype] = original_cres_mask[active_mask] # shape: (num_active_peaks, )
+                # filter the original cre indices by the active mask
+                valid = active_mask[orig_peak_idx] # the mask of each cres, shape: (num_cres, )
+                new_peak_idx = cumsum[orig_peak_idx[valid]] # the peak indices of the active cres, shape: (num_active_cres, )
+                ori_cre_idx = np.nonzero(valid)[0] # the orignal cre indices that are active, shape: (num_active_cres, )
             else:
-                # If not dropping zero-atpm, keep the original indices and mask
-                self.peak_indices_map[celltype] = {i: i for i in range(len(atpm_all))}
                 self.cres_mask[celltype] = original_cres_mask
-            
-            # Load CRE info data if available
-            if 'cre_info' in zarr_obj:
-                self.cre_info[celltype] = {}
-                
-                # Load original peak indices
-                if 'peak_indices' in zarr_obj['cre_info']:
-                    original_peak_indices = zarr_obj['cre_info']['peak_indices'][:]
-                    
-                    # Filter peak indices based on whether they remain after dropping zero-atpm peaks
-                    valid_indices = []
-                    valid_peak_indices = []
-                    
-                    for i, peak_idx in enumerate(original_peak_indices):
-                        if peak_idx in self.peak_indices_map[celltype]:
-                            valid_indices.append(i)
-                            # Map the original peak index to the new index after dropping zero-atpm peaks
-                            valid_peak_indices.append(self.peak_indices_map[celltype][peak_idx])
-                    
-                    self.cre_info[celltype]['original_indices'] = np.array(valid_indices)
-                    self.cre_info[celltype]['peak_indices'] = np.array(valid_peak_indices)
-                else:
-                    logging.warning(f"No peak indices found for cell type '{celltype}'")
-                    continue
-                
-                # Load oligo IDs if available and filter to include only valid indices
-                if 'oligo_ids' in zarr_obj['cre_info']:
-                    all_oligo_ids = zarr_obj['cre_info']['oligo_ids'][:]
-                    self.cre_info[celltype]['oligo_ids'] = all_oligo_ids[self.cre_info[celltype]['original_indices']]
-                else:
-                    logging.warning(f"No oligo IDs found for cell type '{celltype}'")
-                    self.cre_info[celltype]['oligo_ids'] = None
-                
-                # Load oligo sequences if available and filter
-                # if 'oligo_sequences' in zarr_obj['cre_info']:
-                #     all_oligo_sequences = zarr_obj['cre_info']['oligo_sequences'][:]
-                #     self.cre_info[celltype]['oligo_sequences'] = all_oligo_sequences[self.cre_info[celltype]['original_indices']]
-                # else:
-                #     logging.warning(f"No oligo sequences found for cell type '{celltype}'")
-                #     self.cre_info[celltype]['oligo_sequences'] = None
-            
-            # Load CRE activity data if available and filter
-            if 'cre_activity' in zarr_obj and celltype in zarr_obj['cre_activity']:
-                all_activity = zarr_obj['cre_activity'][celltype][:]
-                if len(self.cre_info[celltype]['original_indices']) > 0:
-                    self.cre_activity[celltype] = all_activity[self.cre_info[celltype]['original_indices']]
-                else:
-                    logging.warning(f"No valid CRE indices found for cell type '{celltype}' after filtering")
-                    self.cre_activity[celltype] = np.array([])
+                ori_cre_idx = np.arange(len(orig_peak_idx))
+                new_peak_idx  = orig_peak_idx
+
+            self.cre_info[celltype] = {
+                'original_indices': ori_cre_idx,
+                'peak_indices':     new_peak_idx,
+            }
+
+            # 4) slice oligo_ids
+            all_ids = info_grp.get('oligo_ids', None)
+            self.cre_info[celltype]['oligo_ids'] = (
+                all_ids[ori_cre_idx] if all_ids is not None else None
+            )
+
+            # 5) slice cre_activity
+            all_act = zarr_obj['cre_activity'].get(celltype, None)
+            if all_act is not None:
+                self.cre_activity[celltype] = all_act[ori_cre_idx]
             else:
-                logging.warning(f"No CRE activity data found for cell type '{celltype}'")
-                self.cre_activity[celltype] = np.array([])
-                
-            logging.info(f"Loaded {len(self.cre_info[celltype]['peak_indices'])} CRE regions for {celltype} " +
-                        f"(filtered from {len(original_peak_indices)} original regions)")
+                self.cre_activity[celltype] = np.empty(0, float)
+
+            # store the map if you still need it
+            # self.peak_indices_map[celltype] = cumsum
+
+            logging.info(
+                f"[{celltype}] kept {new_peak_idx.size} / {orig_peak_idx.size} CREs after dropping zero-atpm"
+            )
     
     def _setup_cre_samples(self):
         """Set up CRE-focused samples"""
@@ -1611,144 +1588,127 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
         for celltype, region_motif in tqdm(self.region_motifs.items(), desc="Setting up CRE samples"):
             # Skip cell types that should be left out
             if self.is_train and celltype in self.leave_out_celltypes:
+                logging.warning(f"Cell type '{celltype}' is in the leave-out cell types. Skipping...")
                 continue
             if (
                 not self.is_train
                 and len(self.leave_out_celltypes) > 0
                 and celltype not in self.leave_out_celltypes
             ):
+                logging.warning(f"Cell type '{celltype}' is not in the leave-out cell types. Skipping...")
                 continue
-                
-            # Skip cell types without CRE data
+            # Skip cell types that do not have CRE data
             if celltype not in self.cre_info or 'peak_indices' not in self.cre_info[celltype]:
+                logging.warning(f"Cell type '{celltype}' does not have CRE data. Skipping...")
                 continue
-                
-            peaks_df = region_motif.peaks
-            all_chromosomes = peaks_df["Chromosome"].unique().tolist()
-            input_chromosomes = _chromosome_splitter(
-                all_chromosomes, self.leave_out_chromosomes, self.is_train
-            )
             
-            peak_indices = self.cre_info[celltype]['peak_indices']
-            original_indices = self.cre_info[celltype]['original_indices']
-            oligo_ids = self.cre_info[celltype]['oligo_ids']
-            # oligo_sequences = self.cre_info[celltype]['oligo_sequences']
-            
-            # Process each CRE peak
-            for i, peak_idx in enumerate(peak_indices):
-                # Skip peaks that are out of bounds
-                if peak_idx >= len(peaks_df):
-                    continue
-                    
-                peak_row = peaks_df.iloc[peak_idx]
-                chrom = peak_row["Chromosome"]
-                
-                # Skip chromosomes that should be left out
-                if chrom not in input_chromosomes:
-                    continue
-                
-                # Calculate window start and end
-                start_idx = peak_idx - self.num_region_per_sample // 2
-                end_idx = peak_idx + self.num_region_per_sample // 2
-                
-                # Skip windows that are out of bounds
-                if start_idx < 0 or end_idx >= len(peaks_df):
-                    continue
-                    
-                # Get peak coordinates
-                peak_coord = peaks_df.iloc[start_idx:end_idx][["Start", "End"]].values
-                
-                # Find indices of CREs in this region
-                cre_mask = self.cres_mask[celltype][start_idx:end_idx]
-                cre_positions = np.nonzero(cre_mask)[0]
-                
-                cre_indices = []
-                # Map each CRE position to its index in cre_info
-                for pos in cre_positions:
-                    global_idx = start_idx + pos
-                    cre_idx = np.where(self.cre_info[celltype]['peak_indices'] == global_idx)[0]
-                    if len(cre_idx) > 0:  # Only append if match found
-                        cre_indices.append(cre_idx[0])
-                
-                # Create sample info
-                sample_info = {
+            # 1) grab arrays once
+            peaks_df  = region_motif.peaks
+            chrom_arr = peaks_df["Chromosome"].values
+            coord_arr = peaks_df[["Start","End"]].values
+            mask_arr  = self.cres_mask[celltype]
+
+            # 2) bulk compute start/end & filter bounds
+            ctrs     = self.cre_info[celltype]["peak_indices"] # array of cre indices, shape: (num_cres, )
+            orig_idx = self.cre_info[celltype]["original_indices"]
+            starts   = ctrs - self.num_region_per_sample // 2
+            ends     = ctrs + self.num_region_per_sample // 2
+            ## filter out the cre indices that are out of bounds
+            valid    = (starts >= 0) & (ends < len(peaks_df))
+            starts   = starts[valid]; ends   = ends[valid]
+            ctrs     = ctrs[valid]; orig_idx = orig_idx[valid]
+
+            # 3) bulk filter by chromosome
+            keep_chr = np.isin(chrom_arr[ctrs], _chromosome_splitter(
+                peaks_df["Chromosome"].unique().tolist(),
+                self.leave_out_chromosomes,
+                self.is_train
+            ))
+            starts   = starts[keep_chr]; ends   = ends[keep_chr]
+            ctrs     = ctrs[keep_chr]; orig_idx = orig_idx[keep_chr]
+
+            # 4) build global→local CRE map
+            n = len(peaks_df)
+            local_map = np.full(n, -1, dtype=int)
+            all_cre  = self.cre_info[celltype]["peak_indices"] # array of peaks indices of cres, shape: (num_cres, )
+            local_map[all_cre] = np.arange(len(all_cre)) # map the peaks indices to the cre indices
+
+            # 5) iterate once per window, all slicing in NumPy
+            oids_all = self.cre_info[celltype].get("oligo_ids")
+            act_all  = self.cre_activity.get(celltype, np.array([], float))
+
+            for s, e, center, orig in zip(starts, ends, ctrs, orig_idx):
+                win_mask = mask_arr[s:e]                 # CRE mask in window with shape: (num_region_per_sample, )
+                loc_idx  = local_map[s:e][win_mask==1]   # Indices of cres in window with shape: (num_active_cres_in_window, )
+
+                act_lab = np.full_like(win_mask, -1, dtype=np.float32)
+                if loc_idx.size:
+                    act_lab[win_mask==1] = act_all[loc_idx]
+
+                if oids_all is not None:
+                    oids = np.full_like(win_mask, "", dtype="<U10")
+                    if loc_idx.size:
+                        oids[win_mask==1] = oids_all[loc_idx]
+                else:
+                    oids = np.full(len(win_mask), "", dtype="<U10")
+
+                cre_samples.append({
                     "celltype": celltype,
-                    "start_idx": start_idx,
-                    "end_idx": end_idx,
-                    "chromosome": chrom,
-                    "peak_coord": peak_coord,
-                    "cre_peak_idx": peak_idx - start_idx,  # Relative position within window
-                    "cre_idx": original_indices[i],  # Original index within CRE arrays
+                    "start_idx":   int(s),
+                    "end_idx":     int(e),
+                    "chromosome":  chrom_arr[center],
+                    "peak_coord":  coord_arr[s:e],
+                    "cre_peak_idx":   int(center - s),
+                    "cre_idx":        int(orig),
                     "is_gene_sample": False,
-                    "cre_mask": cre_mask,
-                    "cre_activity_label": np.zeros(len(cre_mask)), # Set below
-                    "oligo_ids": np.full(len(cre_mask), "", dtype="<U10"), # Set below
-                }
-                
-                # Add cre activity label for all CREs in the window (not only the focused CREs)
-                if len(cre_indices) > 0:
-                    sample_info["cre_activity_label"][cre_mask == 1] = self.cre_activity[celltype][cre_indices]
-           
-                # Add oligo IDs if available
-                if len(cre_indices) > 0:
-                    sample_info["oligo_ids"][cre_mask == 1] = oligo_ids[cre_indices]
-                
-                cre_samples.append(sample_info)
-                
+                    "cre_mask":            win_mask,
+                    "cre_activity_label":  act_lab,
+                    "oligo_ids":           oids,
+                })
+
         return cre_samples
     
     def _add_cre_info_to_gene_samples(self, sample_indices):
         """Add CRE information to sample indices focused on genes"""
-        updated_sample_indices = []
-        
-        for sample_info in sample_indices:
-            celltype = sample_info["celltype"]
-            
-            # Raise error if celltype not in cres_mask
-            if celltype not in self.cres_mask:
-                raise ValueError(f"Cell type '{celltype}' not found in cres_mask")
-                
-            start_idx = sample_info["start_idx"]
-            end_idx = sample_info["end_idx"]
-            
-            # Get CRE mask for this region
-            cre_mask = self.cres_mask[celltype][start_idx:end_idx]
-            
-            # Find indices of CREs in this region
-            cre_positions = np.nonzero(cre_mask)[0]
-            cre_indices = []
-            
-            # Map each CRE position to its index in cre_info
-            for pos in cre_positions:
-                global_idx = start_idx + pos
-                cre_idx = np.where(self.cre_info[celltype]['peak_indices'] == global_idx)[0]
-                if len(cre_idx) > 0:  # Only append if match found
-                    cre_indices.append(cre_idx[0])
-            
-            # Create copy of sample info to modify
-            updated_info = sample_info.copy()
-            updated_info['cre_mask'] = cre_mask
-            
-            # Add oligo IDs if available
-            if 'oligo_ids' in self.cre_info[celltype]:
-                updated_info["oligo_ids"] = np.full(len(cre_mask), "", dtype="<U10")
-                if len(cre_indices) > 0:
-                    updated_info["oligo_ids"][cre_mask == 1] = self.cre_info[celltype]['oligo_ids'][cre_indices]
-            
-            # Add CRE activity labels if available
-            if celltype in self.cre_activity:
-                updated_info["cre_activity_label"] = np.zeros(len(cre_mask))
-                if len(cre_indices) > 0:
-                    updated_info["cre_activity_label"][cre_mask == 1] = self.cre_activity[celltype][cre_indices]
-            
-            updated_sample_indices.append(updated_info)
-            
-        return updated_sample_indices
+
+        updated = []
+        for si in sample_indices:
+            celltype = si["celltype"]
+            s, e = si["start_idx"], si["end_idx"]
+
+            # slice global→local map for this region
+            lm = self._cre_local_map[celltype][s:e]    # shape: (window,), if cre is not in the any loci in the window, the value is -1
+            cre_mask = lm >= 0                         # bool mask of CRE positions
+
+            # prepare activity labels
+            act_lab = np.full_like(lm, -1, dtype=np.float32)
+            oids_all = self.cre_info[celltype].get("oligo_ids")
+            oids = np.full(lm.shape, "", dtype="<U10") if oids_all is not None else None
+
+            if cre_mask.any():
+                idxs = lm[cre_mask]                     # local CRE indices
+                act_lab[cre_mask] = self.cre_activity[celltype][idxs]
+                if oids is not None:
+                    oids[cre_mask] = oids_all[idxs]
+
+            # write back into a new dict
+            new_si = si.copy()
+            new_si["cre_mask"] = cre_mask
+            new_si["cre_activity_label"] = act_lab
+            if oids is not None:
+                new_si["oligo_ids"] = oids
+
+            updated.append(new_si)
+
+        return updated
         
     def __len__(self):
         return len(self.sample_indices_merged)
     
     def __getitem__(self, index):
+        return self._cache[index]
+
+    def _makeitem(self, index):
         # Determine if this is a gene-focused or CRE-focused sample
         is_gene = self.is_gene_sample[index]
         
@@ -1853,8 +1813,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             result['cre_mask'] = sample_info['cre_mask']
             
             # Add oligo information if available
-            if "oligo_ids" in sample_info:
-                result["oligo_ids"] = sample_info["oligo_ids"].tolist()
+            result["oligo_ids"] = sample_info["oligo_ids"].tolist()
             
             # For CRE samples, also check if there are TSS positions in this region
             tss_mask = np.zeros(region_length)
@@ -1881,13 +1840,21 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
         
         # Apply transform if available
         if self.transform and "exp_label" in result:
+            # apply transform using a numeric mask
             region_motif_i, mask, target_i = self.transform(
-                region_motif_i, result["mask"], coo_matrix(result["exp_label"])
+                region_motif_i,
+                result["mask"].astype(np.int8),
+                coo_matrix(result["exp_label"]),
             )
+            
             result["mask"] = mask
             result["exp_label"] = target_i.toarray().astype(np.float32)
         
         # Set the final region_motif data
         result["region_motif"] = region_motif_i.astype(np.float32)
+
+        # cast mask back to int8 for consistent collate
+        result["mask"] = result["mask"].astype(np.int8)
+        result["cre_mask"] = result["cre_mask"].astype(np.int8)
 
         return result

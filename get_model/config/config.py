@@ -140,7 +140,10 @@ class DatasetConfig:
     # Dataset size
     dataset_size: int = 40960
     eval_dataset_size: int = 4096
-
+    
+    # Focus
+    gene_focus: bool = True
+    cre_focus: bool = True
 
 @dataclass
 class RegionDatasetConfig:
@@ -472,7 +475,6 @@ class RegionZarrConfig:
     finetune: FinetuneConfig = field(default_factory=FinetuneConfig)
     task: TaskConfig = field(default_factory=TaskConfig)
     supervised_flag: SupervisedFlagConfig = field(default_factory=SupervisedFlagConfig)
-
 
 cs = ConfigStore.instance()
 cs.store(name="base_config", node=Config)

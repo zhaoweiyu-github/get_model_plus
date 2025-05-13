@@ -1,6 +1,7 @@
 import gc
 import logging
 from functools import partial
+from collections import defaultdict
 
 import lightning as L
 import numpy as np
@@ -439,6 +440,16 @@ def run_zarr(cfg: DictConfig):
 class RegionMMLitModel(RegionLitModel):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
+        # buffers for validation
+        self._val_losses = []
+        self._val_preds  = defaultdict(list)
+        self._val_obs    = defaultdict(list)
+
+    def on_validation_epoch_start(self):
+        # reset buffers at the start of each validation epoch
+        self._val_losses.clear()
+        self._val_preds.clear()
+        self._val_obs.clear()
 
     def validation_step(self, batch, batch_idx):
         loss, pred, obs = self._shared_step(batch, batch_idx, stage="val")
@@ -452,65 +463,69 @@ class RegionMMLitModel(RegionLitModel):
             pred["exp"] = pred["exp"][tss_idx > 0].flatten()
             obs["exp"] = obs["exp"][tss_idx > 0].flatten()
             
-            # Error handling for gene expression predictions
-            if pred["exp"].shape[0] == 0:
-                # Skip expression metrics if no TSS regions in this batch
-                if "exp" in pred:
-                    del pred["exp"]
-                    del obs["exp"]
-            elif obs["exp"].sum() == 0 or torch.isnan(pred["exp"]).any() or torch.isnan(obs["exp"]).any():
-                # Skip expression metrics if no expressed genes or NaN values
-                if "exp" in pred:
-                    del pred["exp"]
-                    del obs["exp"]
             
         # For cre prediction (for all samples, filtered by cre_mask)
         if self.cfg.supervised_flag.supervised_cre and 'cre' in pred:
             pred["cre"] = pred["cre"].flatten() # has been filtered by cre_mask
             obs["cre"] = obs["cre"].flatten() # has been filtered by cre_mask
-            
-            # Error handling for CRE activity predictions
-            if pred["cre"].shape[0] == 0:
-                # Skip CRE metrics if no CREs in this batch
-                if "cre" in pred:
-                    del pred["cre"]
-                    del obs["cre"]
-            elif obs["cre"].sum() == 0 or torch.isnan(pred["cre"]).any() or torch.isnan(obs["cre"]).any():
-                # Skip CRE metrics if no CRE activity or NaN values
-                if "cre" in pred:
-                    del pred["cre"]
-                    del obs["cre"]
                 
-        metrics = self.metrics(pred, obs)
-        if batch_idx == 0 and self.cfg.log_image:
-            # log one example as scatter plot
-            for key in pred:
-                plt.clf()
-                if self.cfg.run.use_wandb:
-                    self.logger.experiment.log(
-                        {
-                            f"scatter_{key}": wandb.Image(
-                                sns.scatterplot(
-                                    y=pred[key].detach().cpu().numpy().flatten(),
-                                    x=obs[key].detach().cpu().numpy().flatten(),
-                                )
-                            )
-                        }
-                    )
-        distributed = self.cfg.machine.num_devices > 1
-        self.log_dict(
-            metrics, batch_size=self.cfg.machine.batch_size, sync_dist=distributed
-        )
-        self.log(
-            "val_loss",
-            loss,
-            batch_size=self.cfg.machine.batch_size,
-            sync_dist=distributed,
-        )
+        # metrics = self.metrics(pred, obs)
+
+        # distributed = self.cfg.machine.num_devices > 1
+        # self.log_dict(
+        #     metrics, batch_size=self.cfg.machine.batch_size, sync_dist=distributed,
+        #     reduce_fx=lambda vals: torch.stack(vals).nanmean()
+        # )
+        # self.log(
+        #     "val_loss",
+        #     loss,
+        #     batch_size=self.cfg.machine.batch_size,
+        #     sync_dist=distributed,
+        #     reduce_fx=lambda vals: torch.stack(vals).nanmean()
+        # )
         
         # Add cleanup
-        if self.device.type == "cuda": torch.cuda.empty_cache()
-        gc.collect()
+        # if self.device.type == "cuda": torch.cuda.empty_cache()
+        # gc.collect()
+        
+        # detach and store
+        self._val_losses.append(loss.detach())
+        for key, tensor in pred.items():
+            finite = torch.isfinite(tensor)
+            if finite.any():
+                self._val_preds[key].append(tensor[finite].cpu())
+                self._val_obs[key].append(obs[key][finite].cpu())
+  
+    def on_validation_epoch_end(self):
+        device = self.device
+        # 1) aggregate losses
+        losses = torch.stack([o for o in self._val_losses if torch.isfinite(o)]).to(device)
+        epoch_loss = losses.mean() if losses.numel() else torch.tensor(0.0, device=self.device)
+
+        # 2) concatenate preds & obs
+        final_pred = {
+            k: torch.cat(v, dim=0).to(device)
+            for k, v in self._val_preds.items()
+        }
+        final_obs = {
+            k: torch.cat(v, dim=0).to(device)
+            for k, v in self._val_obs.items()
+        }
+
+        # 3) compute metrics once
+        epoch_metrics = self.metrics(final_pred, final_obs)
+
+        # 4) log once per epoch
+        distributed = self.cfg.machine.num_devices > 1
+        self.log("val_loss", epoch_loss,
+                 batch_size=self.cfg.machine.batch_size,
+                 sync_dist=distributed, 
+                 prog_bar=True)
+        for name, val in epoch_metrics.items():
+            self.log(name, val,
+                     batch_size=self.cfg.machine.batch_size,
+                     sync_dist=distributed, 
+                     prog_bar=True)
 
     def predict_step(self, batch, batch_idx, *args, **kwargs):
         
@@ -740,10 +755,55 @@ class RegionZarrMMDataModule(RegionDataModule):
             gencode_obj=gencode_obj,
         )
 
+class RegionZarrMMDataModuleSequentialTransfer(RegionZarrMMDataModule):
+    """
+    Dataset for domain adaptation, the second stage of sequential transfer learning in few-shot CRE activity prediction.
+    The key difference with RegionZarrMMDataModule: The held-out cell types are used as the target domain, both used as training (supervised by expression or chromatin accessibility) and validation/test.
+    """
+    
+    def __init__(self, cfg: DictConfig):
+        super().__init__(cfg)
+    
+    def build_training_dataset(self, is_train=False, gene_list=None, gencode_obj=None):
+        if gencode_obj is None:
+            gencode_obj = get_gencode_obj(self.cfg.assembly)
+        logging.debug(gencode_obj)
+        return CREInferenceRegionMotifDataset(
+            **self.cfg.dataset,
+            assembly=self.cfg.assembly,
+            is_train=is_train,
+            gene_list=self.cfg.task.gene_list if gene_list is None else gene_list,
+            gencode_obj=gencode_obj,
+        )
+        
+    def build_inference_dataset(self, is_train=False, gene_list=None, gencode_obj=None):
+        if gencode_obj is None:
+            gencode_obj = get_gencode_obj(self.cfg.assembly)
+        logging.debug(gencode_obj)
+        return CREInferenceRegionMotifDataset(
+            **self.cfg.dataset,
+            assembly=self.cfg.assembly,
+            is_train=is_train,
+            gene_list=self.cfg.task.gene_list if gene_list is None else gene_list,
+            gencode_obj=gencode_obj,
+        )
+
 def run_multimodal(cfg: DictConfig):
+    """
+    Run few-shot CRE activity prediction (first stage of sequential transfer learning).
+    """
     model = RegionMMLitModel(cfg)
     logging.debug(OmegaConf.to_yaml(cfg))
     dm = RegionZarrMMDataModule(cfg)
     model.dm = dm
 
+    return run_shared(cfg, model, dm)
+
+def run_multimodal_sequential_transfer(cfg: DictConfig):
+    """
+    Run domain adaptation (second stage of sequential transfer learning).
+    """
+    model = RegionMMLitModel(cfg)
+    dm = RegionZarrMMDataModuleSequentialTransfer(cfg)
+    model.dm = dm
     return run_shared(cfg, model, dm)
