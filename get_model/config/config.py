@@ -309,7 +309,6 @@ class FinetuneConfig:
     patterns_to_drop: list = field(default_factory=lambda: [])
     additional_checkpoints: list = field(default_factory=lambda: [])
 
-
 @dataclass
 class MachineConfig:
     """

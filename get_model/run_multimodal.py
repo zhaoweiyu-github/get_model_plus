@@ -399,6 +399,7 @@ class RegionLitModel(LitModel):
         model.freeze_layers(
             patterns_to_freeze=self.cfg.finetune.patterns_to_freeze, invert_match=False
         )
+
         logging.debug("Model = %s" % str(model))
         return model
 
@@ -532,6 +533,27 @@ class RegionMMLitModel(RegionLitModel):
         if self.cfg.task.test_mode == "inference":
             
             loss, preds, obs = self._shared_step(batch, batch_idx, stage="predict")
+            
+            ### For expression prediciton (for all samples, filtered by tss_mask, which not required that tss in in the center of the window)
+            result_df_all_samples = []
+            if self.cfg.eval_tss and self.cfg.supervised_flag.supervised_exp and "exp" in preds:
+                tss_idx = batch["mask"]
+                preds["exp"] = preds["exp"][tss_idx > 0].flatten()
+                obs["exp"] = obs["exp"][tss_idx > 0].flatten()
+                result_df_all_samples = {
+                    "pred": preds["exp"].cpu().numpy(),
+                    "obs": obs["exp"].cpu().numpy(),
+                }
+            result_df_all_samples = pd.DataFrame(result_df_all_samples)
+                
+            if result_df_all_samples.shape[0] > 0:
+                result_df_all_samples.to_csv(
+                    f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}/{self.cfg.dataset.leave_out_celltypes}_exp_all_samples.csv", # please specify one leave out cell type in each inference run
+                    index=False,
+                    mode="a",
+                    header=False,
+                )
+            
             is_gene = batch["is_gene_sample"]
             # Get indices where is_gene > 0
             gene_sample_indices = torch.where(is_gene > 0)[0]
@@ -764,17 +786,27 @@ class RegionZarrMMDataModuleSequentialTransfer(RegionZarrMMDataModule):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
     
-    def build_training_dataset(self, is_train=False, gene_list=None, gencode_obj=None):
+    def build_training_dataset(self, invert_train_dataset=True, is_train=True, gene_list=None, gencode_obj=None):
         if gencode_obj is None:
             gencode_obj = get_gencode_obj(self.cfg.assembly)
         logging.debug(gencode_obj)
-        return CREInferenceRegionMotifDataset(
-            **self.cfg.dataset,
-            assembly=self.cfg.assembly,
-            is_train=is_train,
-            gene_list=self.cfg.task.gene_list if gene_list is None else gene_list,
-            gencode_obj=gencode_obj,
+        if invert_train_dataset:
+            # invert the train and validation dataset to implement domain adaptation
+            return CREInferenceRegionMotifDataset(
+                **self.cfg.dataset,
+                assembly=self.cfg.assembly,
+                is_train=False,
+                gene_list=self.cfg.task.gene_list if gene_list is None else gene_list,
+                gencode_obj=gencode_obj,
         )
+        else:
+            return CREInferenceRegionMotifDataset(
+                **self.cfg.dataset,
+                assembly=self.cfg.assembly,
+                is_train=is_train,
+                gene_list=self.cfg.task.gene_list if gene_list is None else gene_list,
+                gencode_obj=gencode_obj,
+            )
         
     def build_inference_dataset(self, is_train=False, gene_list=None, gencode_obj=None):
         if gencode_obj is None:

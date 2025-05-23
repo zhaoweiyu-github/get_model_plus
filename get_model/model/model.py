@@ -1932,18 +1932,30 @@ class GETRegionCREFinetune(BaseGETModel):
         pred = {}
         obs = {}
         
+        # Process expression predictions
         if self.supervised_exp and 'exp' in output and 'exp_label' in batch:
             pred['exp'] = output['exp']
             obs['exp'] = batch['exp_label']
+        elif self.supervised_exp and 'exp' in output:
+            pred['exp'] = output['exp']
+        elif 'exp_label' in batch:
+            obs['exp'] = batch['exp_label']
             
+        # Process ATAC predictions
         if self.supervised_atac and 'atac' in output and 'atpm_label' in batch:
             pred['atac'] = output['atac']
             obs['atac'] = batch['atpm_label']
+        elif self.supervised_atac and 'atac' in output:
+            pred['atac'] = output['atac']
+        elif 'atpm_label' in batch:
+            obs['atac'] = batch['atpm_label']
             
-        if self.supervised_cre and 'cre' in output and 'cre_activity_label' in batch:
-
-            pred['cre'] = output['cre'][batch['cre_mask'] > 0]
-            obs['cre'] = batch['cre_activity_label'][batch['cre_mask'] > 0]
+        # Process CRE predictions
+        if self.supervised_cre and 'cre' in output:
+            pred['cre'] = output['cre'][batch['cre_mask'] > 0] if 'cre_mask' in batch else output['cre']
+            
+        if 'cre_activity_label' in batch:
+            obs['cre'] = batch['cre_activity_label'][batch['cre_mask'] > 0] if 'cre_mask' in batch else batch['cre_activity_label']
                 
         return pred, obs
 
