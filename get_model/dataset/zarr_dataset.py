@@ -1732,6 +1732,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             "strand": -1,
             "tss_peak": np.int64(100),
             "all_tss_peak": np.full(self.num_region_per_sample, -1, dtype=np.int64),
+            "cre_idx": -1,
             "cre_peak_idx": -1,
             "oligo_ids": np.full(self.num_region_per_sample, "").tolist(),
             "cre_activity_label": np.zeros(self.num_region_per_sample, dtype=np.float32).reshape(-1, 1),
@@ -1808,6 +1809,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
             # For CRE samples: populate the CRE mask
             cre_peak_idx = sample_info["cre_peak_idx"]
             result['cre_peak_idx'] = cre_peak_idx
+            result['cre_idx'] = sample_info['cre_idx']
             result['cre_mask'] = sample_info['cre_mask']
             
             # Add oligo information if available
