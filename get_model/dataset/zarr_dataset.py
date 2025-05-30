@@ -203,15 +203,13 @@ class RegionDataset(Dataset):
         self.peaks = peaks
         self.targets = targets
         self.tssidxs = np.array(tssidx)
-
+    
     def __repr__(self) -> str:
-        return f"""
-Total {'train' if self.is_train else 'test'} samples: {len(self.peaks)}
-Leave out celltypes: {self.leave_out_celltypes}
-Leave out chromosomes: {self.leave_out_chromosomes}
-Use quantitative_atac: {self.quantitative_atac}
-Sampling step: {self.sampling_step}
-        """
+        if self.is_train:
+            stage = 'train'
+        else:
+            stage = 'test'
+        return f'Total {stage} samples: {len(self.peaks)}, Leave out celltypes: {self.leave_out_celltypes}, Leave out chromosomes: {self.leave_out_chromosomes}, Use quantitative_atac: {self.quantitative_atac}, Sampling step: {self.sampling_step}'
 
     def __getitem__(self, index: int) -> Tuple[coo_matrix, np.ndarray, np.ndarray]:
         """
@@ -1376,7 +1374,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
         is_train (bool, optional): Whether this is a training dataset. Defaults to True.
         mask_ratio (float, optional): Ratio of regions to mask. Defaults to 0.0.
         drop_zero_atpm (bool, optional): Whether to drop regions with zero ATPM. Defaults to True.
-        gene_focus (bool, optional): Whether to focus on gene/TSS regions. Defaults to True.
+        gene_focus (bool, optional): Whether to focus on gene/TSS regions. Defaults to False.
         cre_focus (bool, optional): Whether to focus on CRE regions. Defaults to True.
         label_types (list, optional): List of label types to include. Options are:
             "expression", "chromatin_accessibility", "cre_activity". Defaults to all three.
@@ -1399,7 +1397,7 @@ class CREInferenceRegionMotifDataset(InferenceRegionMotifDataset):
         mask_ratio=0.0,
         drop_zero_atpm=True,
         gene_focus=True,
-        cre_focus=True,
+        cre_focus=False,
         label_types=None,
     ):
         # Set default label types if not provided

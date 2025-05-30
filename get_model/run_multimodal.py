@@ -120,195 +120,195 @@ class RegionLitModel(LitModel):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
 
-    def validation_step(self, batch, batch_idx):
-        loss, pred, obs = self._shared_step(batch, batch_idx, stage="val")
-        # logging.debug(pred['exp'].detach().cpu().numpy().flatten().max(),
-        #       obs['exp'].detach().cpu().numpy().flatten().max())
+    # def validation_step(self, batch, batch_idx):
+    #     loss, pred, obs = self._shared_step(batch, batch_idx, stage="val")
+    #     # logging.debug(pred['exp'].detach().cpu().numpy().flatten().max(),
+    #     #       obs['exp'].detach().cpu().numpy().flatten().max())
 
-        if self.cfg.eval_tss and "exp" in pred:
-            tss_idx = batch["mask"]
-            for key in pred:
-                # pred[key] = (pred[key] * tss_idx)
-                # obs[key] = (obs[key] * tss_idx)
-                pred[key] = pred[key][tss_idx > 0].flatten()
-                obs[key] = obs[key][tss_idx > 0].flatten()
-            # error handling in metric when there is no TSS, or all TSS is not expressed in batch.
-            if pred["exp"].shape[0] == 0:
-                return
-            if obs["exp"].sum() == 0:
-                return
-            # check for nan
-            if torch.isnan(pred["exp"]).any() or torch.isnan(obs["exp"]).any():
-                return
+    #     if self.cfg.eval_tss and "exp" in pred:
+    #         tss_idx = batch["mask"]
+    #         for key in pred:
+    #             # pred[key] = (pred[key] * tss_idx)
+    #             # obs[key] = (obs[key] * tss_idx)
+    #             pred[key] = pred[key][tss_idx > 0].flatten()
+    #             obs[key] = obs[key][tss_idx > 0].flatten()
+    #         # error handling in metric when there is no TSS, or all TSS is not expressed in batch.
+    #         if pred["exp"].shape[0] == 0:
+    #             return
+    #         if obs["exp"].sum() == 0:
+    #             return
+    #         # check for nan
+    #         if torch.isnan(pred["exp"]).any() or torch.isnan(obs["exp"]).any():
+    #             return
 
-        if "hic" in obs:
-            if obs["hic"].flatten().shape[0] > 1000:
-                try:
-                    idx = np.random.choice(
-                        obs["hic"].flatten().shape[0], 1000, replace=False
-                    )
-                    obs["hic"] = obs["hic"].flatten()[idx]
-                    pred["hic"] = pred["hic"].flatten()[idx]
-                except Exception as e:
-                    logging.debug(obs["hic"].shape)
-                    logging.debug(pred["hic"].shape)
-            else:
-                obs["hic"] = torch.randn(1000).to(obs["hic"].device)
-                pred["hic"] = torch.randn(1000).to(pred["hic"].device)
-        metrics = self.metrics(pred, obs)
-        if batch_idx == 0 and self.cfg.log_image:
-            # log one example as scatter plot
-            for key in pred:
-                plt.clf()
-                if self.cfg.run.use_wandb:
-                    self.logger.experiment.log(
-                        {
-                            f"scatter_{key}": wandb.Image(
-                                sns.scatterplot(
-                                    y=pred[key].detach().cpu().numpy().flatten(),
-                                    x=obs[key].detach().cpu().numpy().flatten(),
-                                )
-                            )
-                        }
-                    )
-        distributed = self.cfg.machine.num_devices > 1
-        self.log_dict(
-            metrics, batch_size=self.cfg.machine.batch_size, sync_dist=distributed
-        )
-        self.log(
-            "val_loss",
-            loss,
-            batch_size=self.cfg.machine.batch_size,
-            sync_dist=distributed,
-        )
+    #     if "hic" in obs:
+    #         if obs["hic"].flatten().shape[0] > 1000:
+    #             try:
+    #                 idx = np.random.choice(
+    #                     obs["hic"].flatten().shape[0], 1000, replace=False
+    #                 )
+    #                 obs["hic"] = obs["hic"].flatten()[idx]
+    #                 pred["hic"] = pred["hic"].flatten()[idx]
+    #             except Exception as e:
+    #                 logging.debug(obs["hic"].shape)
+    #                 logging.debug(pred["hic"].shape)
+    #         else:
+    #             obs["hic"] = torch.randn(1000).to(obs["hic"].device)
+    #             pred["hic"] = torch.randn(1000).to(pred["hic"].device)
+    #     metrics = self.metrics(pred, obs)
+    #     if batch_idx == 0 and self.cfg.log_image:
+    #         # log one example as scatter plot
+    #         for key in pred:
+    #             plt.clf()
+    #             if self.cfg.run.use_wandb:
+    #                 self.logger.experiment.log(
+    #                     {
+    #                         f"scatter_{key}": wandb.Image(
+    #                             sns.scatterplot(
+    #                                 y=pred[key].detach().cpu().numpy().flatten(),
+    #                                 x=obs[key].detach().cpu().numpy().flatten(),
+    #                             )
+    #                         )
+    #                     }
+    #                 )
+    #     distributed = self.cfg.machine.num_devices > 1
+    #     self.log_dict(
+    #         metrics, batch_size=self.cfg.machine.batch_size, sync_dist=distributed
+    #     )
+    #     self.log(
+    #         "val_loss",
+    #         loss,
+    #         batch_size=self.cfg.machine.batch_size,
+    #         sync_dist=distributed,
+    #     )
         
-        # Add cleanup
-        if self.device.type == "cuda": torch.cuda.empty_cache()
-        gc.collect()
+    #     # Add cleanup
+    #     if self.device.type == "cuda": torch.cuda.empty_cache()
+    #     gc.collect()
 
-    def predict_step(self, batch, batch_idx, *args, **kwargs):
-        if self.cfg.task.test_mode == "inference":
-            loss, preds, obs = self._shared_step(batch, batch_idx, stage="predict")
-            result_df = []
-            for batch_element in range(len(batch["gene_name"])):
-                goi_idx = batch["all_tss_peak"][batch_element]
-                goi_idx = goi_idx[goi_idx > 0]  # filter out pad (tss_peak = 0)
-                strand = batch["strand"][batch_element]
-                atpm = (
-                    batch["region_motif"][batch_element][goi_idx, -1].max().cpu().item()
-                )
-                gene_name = batch["gene_name"][batch_element]
-                for key in preds:
-                    result_df.append(
-                        {
-                            "gene_name": gene_name,
-                            "key": key,
-                            "pred": preds[key][batch_element][:, strand][goi_idx]
-                            .max()
-                            .cpu()
-                            .item(),
-                            "obs": obs[key][batch_element][:, strand][goi_idx]
-                            .max()
-                            .cpu()
-                            .item(),
-                            "atpm": atpm,
-                        }
-                    )
-            result_df = pd.DataFrame(result_df)
-            # mkdir if not exist
-            os.makedirs(
-                f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}",
-                exist_ok=True,
-            )
-            result_df.to_csv(
-                f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}.csv",
-                index=False,
-                mode="a",
-                header=False,
-            )
-            return result_df
-        elif self.cfg.task.test_mode == "perturb":
-            # TODO: need to figure out if batching is working
-            preds = self.perturb_step(batch, batch_idx)
-            batch_size = len(batch["WT"]["strand"])
-            results = []
+    # def predict_step(self, batch, batch_idx, *args, **kwargs):
+    #     if self.cfg.task.test_mode == "inference":
+    #         loss, preds, obs = self._shared_step(batch, batch_idx, stage="predict")
+    #         result_df = []
+    #         for batch_element in range(len(batch["gene_name"])):
+    #             goi_idx = batch["all_tss_peak"][batch_element]
+    #             goi_idx = goi_idx[goi_idx > 0]  # filter out pad (tss_peak = 0)
+    #             strand = batch["strand"][batch_element]
+    #             atpm = (
+    #                 batch["region_motif"][batch_element][goi_idx, -1].max().cpu().item()
+    #             )
+    #             gene_name = batch["gene_name"][batch_element]
+    #             for key in preds:
+    #                 result_df.append(
+    #                     {
+    #                         "gene_name": gene_name,
+    #                         "key": key,
+    #                         "pred": preds[key][batch_element][:, strand][goi_idx]
+    #                         .max()
+    #                         .cpu()
+    #                         .item(),
+    #                         "obs": obs[key][batch_element][:, strand][goi_idx]
+    #                         .max()
+    #                         .cpu()
+    #                         .item(),
+    #                         "atpm": atpm,
+    #                     }
+    #                 )
+    #         result_df = pd.DataFrame(result_df)
+    #         # mkdir if not exist
+    #         os.makedirs(
+    #             f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}",
+    #             exist_ok=True,
+    #         )
+    #         result_df.to_csv(
+    #             f"{self.cfg.machine.output_dir}/{self.cfg.run.project_name}/{self.cfg.run.run_name}.csv",
+    #             index=False,
+    #             mode="a",
+    #             header=False,
+    #         )
+    #         return result_df
+    #     elif self.cfg.task.test_mode == "perturb":
+    #         # TODO: need to figure out if batching is working
+    #         preds = self.perturb_step(batch, batch_idx)
+    #         batch_size = len(batch["WT"]["strand"])
+    #         results = []
 
-            for i in range(batch_size):
-                strand = batch["WT"]["strand"][i].cpu().numpy()
-                gene_name = batch["WT"]["gene_name"][i]
-                tss_peak = batch["WT"]["tss_peak"][i].cpu().numpy()
-                goi_idx = batch["WT"]["all_tss_peak"][i].cpu().numpy()
-                goi_idx = goi_idx[goi_idx > 0]
-                goi_idx = goi_idx[goi_idx < preds["pred_wt"]["exp"][i].shape[0]]
+    #         for i in range(batch_size):
+    #             strand = batch["WT"]["strand"][i].cpu().numpy()
+    #             gene_name = batch["WT"]["gene_name"][i]
+    #             tss_peak = batch["WT"]["tss_peak"][i].cpu().numpy()
+    #             goi_idx = batch["WT"]["all_tss_peak"][i].cpu().numpy()
+    #             goi_idx = goi_idx[goi_idx > 0]
+    #             goi_idx = goi_idx[goi_idx < preds["pred_wt"]["exp"][i].shape[0]]
 
-                result = {
-                    "gene_name": gene_name,
-                    "strand": strand,
-                    "tss_peak": tss_peak,
-                    "perturb_chrom": batch["MUT"]["perturb_chrom"][i],
-                    "perturb_start": batch["MUT"]["perturb_start"][i].cpu().item(),
-                    "perturb_end": batch["MUT"]["perturb_end"][i].cpu().item(),
-                    "pred_wt": preds["pred_wt"]["exp"][i][:, strand][goi_idx]
-                    .mean()
-                    .cpu()
-                    .item(),
-                    "pred_mut": preds["pred_mut"]["exp"][i][:, strand][goi_idx]
-                    .mean()
-                    .cpu()
-                    .item(),
-                    "obs": preds["obs_wt"]["exp"][i][:, strand][goi_idx]
-                    .mean()
-                    .cpu()
-                    .item(),
-                }
-                results.append(result)
+    #             result = {
+    #                 "gene_name": gene_name,
+    #                 "strand": strand,
+    #                 "tss_peak": tss_peak,
+    #                 "perturb_chrom": batch["MUT"]["perturb_chrom"][i],
+    #                 "perturb_start": batch["MUT"]["perturb_start"][i].cpu().item(),
+    #                 "perturb_end": batch["MUT"]["perturb_end"][i].cpu().item(),
+    #                 "pred_wt": preds["pred_wt"]["exp"][i][:, strand][goi_idx]
+    #                 .mean()
+    #                 .cpu()
+    #                 .item(),
+    #                 "pred_mut": preds["pred_mut"]["exp"][i][:, strand][goi_idx]
+    #                 .mean()
+    #                 .cpu()
+    #                 .item(),
+    #                 "obs": preds["obs_wt"]["exp"][i][:, strand][goi_idx]
+    #                 .mean()
+    #                 .cpu()
+    #                 .item(),
+    #             }
+    #             results.append(result)
 
-            # Save results to a csv as multiple rows
-            results_df = pd.DataFrame(results)
-            results_df.to_csv(
-                f"{self.cfg.machine.output_dir}/{self.cfg.run.run_name}.csv",
-                index=False,
-                mode="a",
-                header=False,
-            )
-            return results_df
-            # except Exception as    e:
-            # logging.debug(e)
+    #         # Save results to a csv as multiple rows
+    #         results_df = pd.DataFrame(results)
+    #         results_df.to_csv(
+    #             f"{self.cfg.machine.output_dir}/{self.cfg.run.run_name}.csv",
+    #             index=False,
+    #             mode="a",
+    #             header=False,
+    #         )
+    #         return results_df
+    #         # except Exception as    e:
+    #         # logging.debug(e)
 
-        elif self.cfg.task.test_mode == "interpret":
-            with torch.enable_grad():
-                focus = 100  # Fixed focus point
-                preds, obs, jacobians, embeddings = self.interpret_step(
-                    batch, batch_idx, layer_names=self.cfg.task.layer_names, focus=focus
-                )
+    #     elif self.cfg.task.test_mode == "interpret":
+    #         with torch.enable_grad():
+    #             focus = 100  # Fixed focus point
+    #             preds, obs, jacobians, embeddings = self.interpret_step(
+    #                 batch, batch_idx, layer_names=self.cfg.task.layer_names, focus=focus
+    #             )
                 
-                # Create padded arrays and reshape to match other dimensions
-                gene_names = np.array([
-                    name.ljust(100) if len(name) < 100 else name[:100] 
-                    for name in batch["gene_name"]
-                ], dtype='U100')
-                gene_names = gene_names.reshape(-1)  # Flatten from (1000, 8) to (8000,)
+    #             # Create padded arrays and reshape to match other dimensions
+    #             gene_names = np.array([
+    #                 name.ljust(100) if len(name) < 100 else name[:100] 
+    #                 for name in batch["gene_name"]
+    #             ], dtype='U100')
+    #             gene_names = gene_names.reshape(-1)  # Flatten from (1000, 8) to (8000,)
                 
-                chromosomes = np.array([
-                    chrom.ljust(30) if len(chrom) < 30 else chrom[:30]
-                    for chrom in batch["chromosome"]
-                ], dtype='U30')
-                chromosomes = chromosomes.reshape(-1)  # Flatten from (1000, 8) to (8000,)
+    #             chromosomes = np.array([
+    #                 chrom.ljust(30) if len(chrom) < 30 else chrom[:30]
+    #                 for chrom in batch["chromosome"]
+    #             ], dtype='U30')
+    #             chromosomes = chromosomes.reshape(-1)  # Flatten from (1000, 8) to (8000,)
 
-                result = {
-                    "preds": preds,
-                    "obs": obs,
-                    "jacobians": jacobians,
-                    "input": embeddings["input"]["region_motif"],
-                    "embeddings": embeddings,
-                    "chromosome": chromosomes,
-                    "peak_coord": recursive_numpy(recursive_detach(batch["peak_coord"])),
-                    "strand": recursive_numpy(recursive_detach(batch["strand"])),
-                    "focus": recursive_numpy(recursive_detach(batch["all_tss_peak"])),
-                    "available_genes": gene_names,
-                }
-                self.accumulated_results.append(result)
-                return
+    #             result = {
+    #                 "preds": preds,
+    #                 "obs": obs,
+    #                 "jacobians": jacobians,
+    #                 "input": embeddings["input"]["region_motif"],
+    #                 "embeddings": embeddings,
+    #                 "chromosome": chromosomes,
+    #                 "peak_coord": recursive_numpy(recursive_detach(batch["peak_coord"])),
+    #                 "strand": recursive_numpy(recursive_detach(batch["strand"])),
+    #                 "focus": recursive_numpy(recursive_detach(batch["all_tss_peak"])),
+    #                 "available_genes": gene_names,
+    #             }
+    #             self.accumulated_results.append(result)
+    #             return
 
     def get_model(self):
         model = instantiate(self.cfg.model)
@@ -666,88 +666,88 @@ class RegionMMLitModel(RegionLitModel):
             
             return result_df, result_df_cre
         
-        elif self.cfg.task.test_mode == "perturb":
-            # TODO: need to figure out if batching is working
-            preds = self.perturb_step(batch, batch_idx)
-            batch_size = len(batch["WT"]["strand"])
-            results = []
+        # elif self.cfg.task.test_mode == "perturb":
+        #     # TODO: need to figure out if batching is working
+        #     preds = self.perturb_step(batch, batch_idx)
+        #     batch_size = len(batch["WT"]["strand"])
+        #     results = []
 
-            for i in range(batch_size):
-                strand = batch["WT"]["strand"][i].cpu().numpy()
-                gene_name = batch["WT"]["gene_name"][i]
-                tss_peak = batch["WT"]["tss_peak"][i].cpu().numpy()
-                goi_idx = batch["WT"]["all_tss_peak"][i].cpu().numpy()
-                goi_idx = goi_idx[goi_idx > 0]
-                goi_idx = goi_idx[goi_idx < preds["pred_wt"]["exp"][i].shape[0]]
+        #     for i in range(batch_size):
+        #         strand = batch["WT"]["strand"][i].cpu().numpy()
+        #         gene_name = batch["WT"]["gene_name"][i]
+        #         tss_peak = batch["WT"]["tss_peak"][i].cpu().numpy()
+        #         goi_idx = batch["WT"]["all_tss_peak"][i].cpu().numpy()
+        #         goi_idx = goi_idx[goi_idx > 0]
+        #         goi_idx = goi_idx[goi_idx < preds["pred_wt"]["exp"][i].shape[0]]
 
-                result = {
-                    "gene_name": gene_name,
-                    "strand": strand,
-                    "tss_peak": tss_peak,
-                    "perturb_chrom": batch["MUT"]["perturb_chrom"][i],
-                    "perturb_start": batch["MUT"]["perturb_start"][i].cpu().item(),
-                    "perturb_end": batch["MUT"]["perturb_end"][i].cpu().item(),
-                    "pred_wt": preds["pred_wt"]["exp"][i][:, strand][goi_idx]
-                    .mean()
-                    .cpu()
-                    .item(),
-                    "pred_mut": preds["pred_mut"]["exp"][i][:, strand][goi_idx]
-                    .mean()
-                    .cpu()
-                    .item(),
-                    "obs": preds["obs_wt"]["exp"][i][:, strand][goi_idx]
-                    .mean()
-                    .cpu()
-                    .item(),
-                }
-                results.append(result)
+        #         result = {
+        #             "gene_name": gene_name,
+        #             "strand": strand,
+        #             "tss_peak": tss_peak,
+        #             "perturb_chrom": batch["MUT"]["perturb_chrom"][i],
+        #             "perturb_start": batch["MUT"]["perturb_start"][i].cpu().item(),
+        #             "perturb_end": batch["MUT"]["perturb_end"][i].cpu().item(),
+        #             "pred_wt": preds["pred_wt"]["exp"][i][:, strand][goi_idx]
+        #             .mean()
+        #             .cpu()
+        #             .item(),
+        #             "pred_mut": preds["pred_mut"]["exp"][i][:, strand][goi_idx]
+        #             .mean()
+        #             .cpu()
+        #             .item(),
+        #             "obs": preds["obs_wt"]["exp"][i][:, strand][goi_idx]
+        #             .mean()
+        #             .cpu()
+        #             .item(),
+        #         }
+        #         results.append(result)
 
-            # Save results to a csv as multiple rows
-            results_df = pd.DataFrame(results)
-            results_df.to_csv(
-                f"{self.cfg.machine.output_dir}/{self.cfg.run.run_name}.csv",
-                index=False,
-                mode="a",
-                header=False,
-            )
-            return results_df
-            # except Exception as    e:
-            # logging.debug(e)
+        #     # Save results to a csv as multiple rows
+        #     results_df = pd.DataFrame(results)
+        #     results_df.to_csv(
+        #         f"{self.cfg.machine.output_dir}/{self.cfg.run.run_name}.csv",
+        #         index=False,
+        #         mode="a",
+        #         header=False,
+        #     )
+        #     return results_df
+        #     # except Exception as    e:
+        #     # logging.debug(e)
 
-        elif self.cfg.task.test_mode == "interpret":
-            with torch.enable_grad():
-                focus = 100  # Fixed focus point
-                preds, obs, jacobians, embeddings = self.interpret_step(
-                    batch, batch_idx, layer_names=self.cfg.task.layer_names, focus=focus
-                )
+        # elif self.cfg.task.test_mode == "interpret":
+        #     with torch.enable_grad():
+        #         focus = 100  # Fixed focus point
+        #         preds, obs, jacobians, embeddings = self.interpret_step(
+        #             batch, batch_idx, layer_names=self.cfg.task.layer_names, focus=focus
+        #         )
                 
-                # Create padded arrays and reshape to match other dimensions
-                gene_names = np.array([
-                    name.ljust(100) if len(name) < 100 else name[:100] 
-                    for name in batch["gene_name"]
-                ], dtype='U100')
-                gene_names = gene_names.reshape(-1)  # Flatten from (1000, 8) to (8000,)
+        #         # Create padded arrays and reshape to match other dimensions
+        #         gene_names = np.array([
+        #             name.ljust(100) if len(name) < 100 else name[:100] 
+        #             for name in batch["gene_name"]
+        #         ], dtype='U100')
+        #         gene_names = gene_names.reshape(-1)  # Flatten from (1000, 8) to (8000,)
                 
-                chromosomes = np.array([
-                    chrom.ljust(30) if len(chrom) < 30 else chrom[:30]
-                    for chrom in batch["chromosome"]
-                ], dtype='U30')
-                chromosomes = chromosomes.reshape(-1)  # Flatten from (1000, 8) to (8000,)
+        #         chromosomes = np.array([
+        #             chrom.ljust(30) if len(chrom) < 30 else chrom[:30]
+        #             for chrom in batch["chromosome"]
+        #         ], dtype='U30')
+        #         chromosomes = chromosomes.reshape(-1)  # Flatten from (1000, 8) to (8000,)
 
-                result = {
-                    "preds": preds,
-                    "obs": obs,
-                    "jacobians": jacobians,
-                    "input": embeddings["input"]["region_motif"],
-                    "embeddings": embeddings,
-                    "chromosome": chromosomes,
-                    "peak_coord": recursive_numpy(recursive_detach(batch["peak_coord"])),
-                    "strand": recursive_numpy(recursive_detach(batch["strand"])),
-                    "focus": recursive_numpy(recursive_detach(batch["all_tss_peak"])),
-                    "available_genes": gene_names,
-                }
-                self.accumulated_results.append(result)
-                return
+        #         result = {
+        #             "preds": preds,
+        #             "obs": obs,
+        #             "jacobians": jacobians,
+        #             "input": embeddings["input"]["region_motif"],
+        #             "embeddings": embeddings,
+        #             "chromosome": chromosomes,
+        #             "peak_coord": recursive_numpy(recursive_detach(batch["peak_coord"])),
+        #             "strand": recursive_numpy(recursive_detach(batch["strand"])),
+        #             "focus": recursive_numpy(recursive_detach(batch["all_tss_peak"])),
+        #             "available_genes": gene_names,
+        #         }
+        #         self.accumulated_results.append(result)
+        #         return
 
 class RegionZarrMMDataModule(RegionDataModule):
     def __init__(self, cfg: DictConfig):

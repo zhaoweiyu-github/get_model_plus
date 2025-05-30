@@ -140,10 +140,6 @@ class DatasetConfig:
     # Dataset size
     dataset_size: int = 40960
     eval_dataset_size: int = 4096
-    
-    # Focus
-    gene_focus: bool = True
-    cre_focus: bool = True
 
 @dataclass
 class RegionDatasetConfig:
@@ -192,6 +188,10 @@ class RegionMotifDatasetConfig:
     leave_out_chromosomes: str | None = None
     leave_out_celltypes: str | None = None
     mask_ratio: float = 0.0
+    
+    # Focus
+    gene_focus: bool = False
+    cre_focus: bool = True
 
 
 @dataclass
