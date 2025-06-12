@@ -21,7 +21,7 @@ np.bool = np.bool_
 
 import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger, WandbLogger
+from lightning.pytorch.loggers import CSVLogger, WandbLogger, TensorBoardLogger
 from lightning.pytorch.plugins import MixedPrecision
 from omegaconf import OmegaConf
 
@@ -67,6 +67,16 @@ def setup_trainer(cfg):
                 cfg.run.project_name,
                 cfg.run.run_name,
                 "csv_logs",
+            )
+        )
+    )
+    logger.append(
+        TensorBoardLogger(
+            save_dir=os.path.join(
+                cfg.machine.output_dir,
+                cfg.run.project_name,
+                cfg.run.run_name,
+                "tensorboard_logs",
             )
         )
     )
@@ -230,6 +240,35 @@ def load_state_dict(model, state_dict, strict=True, patterns_to_drop=[]):
 
     # Update model's state_dict with the matched pretrained weights
     model_dict.update(matched_dict)
+
+    # Now load the updated dict with strict=True: no unexpected keys, no missing ones
+    model.load_state_dict(model_dict)
+    
+def load_state_dict_sequential_transfer(model, state_dict, strict=True, patterns_to_drop=[]):
+    """Load the state_dict of the model, only load the weights that exist in the model and the state_dict, and the shape of the weights should be the same, and handle the checkpoint from lightning with prefix model."""
+    # Remove keys matching the patterns_to_drop
+    for pattern in patterns_to_drop:
+        state_dict = {k: v for k, v in state_dict.items() if pattern not in k}
+    
+    model_dict = model.state_dict()
+
+    # Filter out weights that exist in both the pretrained checkpoint and model
+    matched_dict = {k: v for k, v in state_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
+
+    # Update model's state_dict with the matched pretrained weights
+    model_dict.update(matched_dict)
+    
+    # Report the matched_dict and its keys
+    print(f"Matched dict would be loaded from checkpoint: {matched_dict.keys()}")
+
+    # Filter out the keys in lightning checkpoint
+    l_matched_dict = {k: state_dict[f"model.{k}"] for k, v in model_dict.items() if f"model.{k}" in state_dict and v.shape == state_dict[f"model.{k}"].shape}
+
+    # Print the keys unmatched in lightning checkpoint
+    print(f"Keys unmatched in lightning checkpoint: {set(model_dict.keys()) - set(l_matched_dict.keys())}")
+
+    # Update model's state_dict with the matched pretrained weights
+    model_dict.update(l_matched_dict)
 
     # Now load the updated dict with strict=True: no unexpected keys, no missing ones
     model.load_state_dict(model_dict)

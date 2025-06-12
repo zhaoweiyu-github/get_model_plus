@@ -32,6 +32,7 @@ from get_model.utils import (
     extract_state_dict,
     load_checkpoint,
     load_state_dict,
+    load_state_dict_sequential_transfer,
     recursive_detach,
     recursive_numpy,
     rename_state_dict,
@@ -749,6 +750,57 @@ class RegionMMLitModel(RegionLitModel):
         #         self.accumulated_results.append(result)
         #         return
 
+class RegionMMLitModelSequentialTransfer(RegionMMLitModel):
+    def __init__(self, cfg: DictConfig):
+        super().__init__(cfg)
+
+    def get_model(self):
+        model = instantiate(self.cfg.model)
+
+        # Load main model checkpoint
+        checkpoint_model = load_checkpoint(
+            self.cfg.finetune.checkpoint, model_key=self.cfg.finetune.model_key
+        )
+        checkpoint_model = extract_state_dict(checkpoint_model)
+        lora_config = {  # specify which layers to add lora to, by default only add to linear layers
+            nn.Linear: {
+                "weight": partial(LoRAParametrization.from_linear, rank=8),
+            },
+            nn.Conv2d: {
+                "weight": partial(LoRAParametrization.from_conv2d, rank=4),
+            },
+        }
+        
+        if (
+            any("lora" in k for k in checkpoint_model.keys())
+            and self.cfg.finetune.use_lora
+        ):
+            add_lora_by_name(model, self.cfg.finetune.layers_with_lora, lora_config)
+            load_state_dict_sequential_transfer(
+                model, checkpoint_model, strict=self.cfg.finetune.strict
+            )
+            
+        elif (
+            any("lora" in k for k in checkpoint_model.keys())
+            and not self.cfg.finetune.use_lora
+        ):
+            raise ValueError(
+                "Model checkpoint contains LoRA parameters but use_lora is set to False"
+            )
+            
+        else:
+            load_state_dict_sequential_transfer(
+                model, checkpoint_model, strict=self.cfg.finetune.strict
+            )
+        
+        # Freeze the layers
+        model.freeze_layers(
+            patterns_to_freeze=self.cfg.finetune.patterns_to_freeze, invert_match=False
+        )
+
+        logging.debug("Model = %s" % str(model))
+        return model
+
 class RegionZarrMMDataModule(RegionDataModule):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
@@ -786,32 +838,43 @@ class RegionZarrMMDataModuleSequentialTransfer(RegionZarrMMDataModule):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
     
-    def build_training_dataset(self, invert_train_dataset=True, is_train=True, gene_list=None, gencode_obj=None):
+    def build_training_dataset(self, is_train=True, gene_list=None, gencode_obj=None):
         if gencode_obj is None:
             gencode_obj = get_gencode_obj(self.cfg.assembly)
         logging.debug(gencode_obj)
-        if invert_train_dataset:
-            # invert the train and validation dataset to implement domain adaptation
-            return CREInferenceRegionMotifDataset(
-                **self.cfg.dataset,
-                assembly=self.cfg.assembly,
-                is_train=False,
-                gene_list=self.cfg.task.gene_list if gene_list is None else gene_list,
-                gencode_obj=gencode_obj,
+        
+        # For validation and test, use the training cell types as the target domain (set it as the leave out cell types)
+        if not is_train:
+            all_celltypes = self.cfg.dataset.celltypes.split(",")
+            if isinstance(self.cfg.dataset.leave_out_celltypes, str):
+                ori_leave_out_celltypes = self.cfg.dataset.leave_out_celltypes.split(",")
+            else:
+                ori_leave_out_celltypes = []
+            train_celltypes = [celltype for celltype in all_celltypes if celltype not in ori_leave_out_celltypes]
+            self.cfg.dataset.leave_out_celltypes = ",".join(train_celltypes)
+
+        return CREInferenceRegionMotifDataset(
+            **self.cfg.dataset,
+            assembly=self.cfg.assembly,
+            is_train=is_train,
+            gene_list=self.cfg.task.gene_list if gene_list is None else gene_list,
+            gencode_obj=gencode_obj,
         )
-        else:
-            return CREInferenceRegionMotifDataset(
-                **self.cfg.dataset,
-                assembly=self.cfg.assembly,
-                is_train=is_train,
-                gene_list=self.cfg.task.gene_list if gene_list is None else gene_list,
-                gencode_obj=gencode_obj,
-            )
         
     def build_inference_dataset(self, is_train=False, gene_list=None, gencode_obj=None):
         if gencode_obj is None:
             gencode_obj = get_gencode_obj(self.cfg.assembly)
         logging.debug(gencode_obj)
+        
+        if not is_train:
+            all_celltypes = self.cfg.dataset.celltypes.split(",")
+            if isinstance(self.cfg.dataset.leave_out_celltypes, str):
+                ori_leave_out_celltypes = self.cfg.dataset.leave_out_celltypes.split(",")
+            else:
+                ori_leave_out_celltypes = []
+            train_celltypes = [celltype for celltype in all_celltypes if celltype not in ori_leave_out_celltypes]
+            self.cfg.dataset.leave_out_celltypes = ",".join(train_celltypes)
+        
         return CREInferenceRegionMotifDataset(
             **self.cfg.dataset,
             assembly=self.cfg.assembly,
@@ -835,7 +898,7 @@ def run_multimodal_sequential_transfer(cfg: DictConfig):
     """
     Run domain adaptation (second stage of sequential transfer learning).
     """
-    model = RegionMMLitModel(cfg)
+    model = RegionMMLitModelSequentialTransfer(cfg)
     dm = RegionZarrMMDataModuleSequentialTransfer(cfg)
     model.dm = dm
     return run_shared(cfg, model, dm)
